@@ -38,6 +38,7 @@ HELP_TEXT = (
     "`!runs` — list experiments and their status\n"
     "`!approve <id>` — approve and launch a pending experiment\n"
     "`!cancel <id>` — cancel a running experiment\n"
+    "`!getfile <path>` — fetch a written output (e.g. a drafted LaTeX review)\n"
     "`!help` — this message\n\n"
     "Otherwise, just talk to me — DM or @-mention."
 )
@@ -287,8 +288,31 @@ class ResearchBot(discord.Client):
                 await message.channel.send("Memory isn't configured, so I can't store that.")
         elif cmd in {"runs", "approve", "cancel"}:
             await self._handle_experiment_command(message, cmd, arg.strip())
+        elif cmd == "getfile":
+            await self._send_file(message, arg.strip())
         else:
             await message.channel.send(f"Unknown command `!{cmd}`.\n\n{HELP_TEXT}")
+
+    async def _send_file(self, message, relpath: str) -> None:
+        if not relpath:
+            await message.channel.send("Usage: `!getfile <path>` (relative to outputs/)")
+            return
+        from pathlib import Path
+
+        base = Path(settings.output_dir).resolve()
+        target = (base / relpath).resolve()
+        # Confine to the outputs directory; reject traversal / absolute escapes.
+        if target != base and base not in target.parents:
+            await message.channel.send("Path is outside the outputs directory.")
+            return
+        if not target.is_file():
+            await message.channel.send(f"No such file: `{relpath}`")
+            return
+        # Discord's default non-boosted upload limit is 25 MB; stay well under.
+        if target.stat().st_size > 8 * 1024 * 1024:
+            await message.channel.send("File is too large to upload (>8 MB).")
+            return
+        await message.channel.send(file=discord.File(str(target)))
 
     async def _handle_experiment_command(self, message, cmd, arg) -> None:
         if self.experiments is None:

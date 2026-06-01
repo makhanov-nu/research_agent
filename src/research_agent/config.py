@@ -84,6 +84,8 @@ class Settings(BaseSettings):
     experiment_workspace_dir: str = "workspace"
     # Local directory where fetched experiment artifacts are stored.
     experiment_artifacts_dir: str = "artifacts"
+    # Directory for written outputs (LaTeX literature reviews, drafts, etc.).
+    output_dir: str = "outputs"
     # Require a human approval in Discord before launching a run.
     experiment_require_approval: bool = True
     # How often (seconds) the job poller checks active runs.

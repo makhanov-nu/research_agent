@@ -21,6 +21,7 @@ env/
 data/
 workspace/
 artifacts/
+outputs/
 
 # OS / editors
 .DS_Store

@@ -50,11 +50,21 @@ async def build_graph(
         experiment_runner: an ExperimentRunner whose tools are exposed to the
             model, or None to run without experiment tooling.
     """
-    tools = await load_mcp_tools()
+    mcp_tools = await load_mcp_tools()
+    tools = list(mcp_tools)
+
+    # Writing tools: the lit-review subagent reuses the literature (MCP) tools.
+    from ..writing.lit_review import LiteratureReviewer
+    from ..writing.tools import build_writing_tools
+
+    reviewer = LiteratureReviewer(get_llm(), mcp_tools, settings.output_dir)
+    tools += build_writing_tools(reviewer)
+
     if experiment_runner is not None and experiment_runner.enabled:
         from ..experiments.tools import build_experiment_tools
 
-        tools = [*tools, *build_experiment_tools(experiment_runner)]
+        tools += build_experiment_tools(experiment_runner)
+
     llm = get_llm()
     llm_with_tools = llm.bind_tools(tools) if tools else llm
 
