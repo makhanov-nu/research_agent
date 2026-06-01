@@ -48,13 +48,27 @@ class MemoryManager:
     async def remember(
         self, channel_id: str, user_text: str, agent_text: str,
         cumulative_tokens: int = 0, source: str | None = None,
+        summary: str | None = None,
     ) -> None:
-        """Persist one exchange: facts (mem0), activity, and an action log entry."""
-        await self.episodic.touch_channel(channel_id, cumulative_tokens)
-        await self.episodic.log_action(
-            "exchange", user_text[:280], channel_id=channel_id
-        )
-        if self.semantic.enabled:
-            await asyncio.to_thread(
-                self.semantic.remember, user_text, agent_text, source
+        """Persist one exchange: activity, durable summary, facts, action log.
+
+        Runs as a fire-and-forget background task, so it logs and swallows its
+        own failures rather than surfacing them as unobserved task exceptions.
+        """
+        try:
+            await self.episodic.touch_channel(channel_id, cumulative_tokens)
+            # Keep the durable episodic summary in sync with auto-summarization
+            # so idle archival never reads an empty summary.
+            if summary:
+                await self.episodic.set_summary(channel_id, summary)
+            await self.episodic.log_action(
+                "exchange", user_text[:280], channel_id=channel_id
+            )
+            if self.semantic.enabled:
+                await asyncio.to_thread(
+                    self.semantic.remember, user_text, agent_text, source
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Background memory persistence failed for channel %s", channel_id
             )

@@ -19,6 +19,15 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# Columns that update_experiment is allowed to write, and which of them are
+# JSONB (so values must be json-encoded). Anything outside this set is rejected
+# before any SQL is built, so untrusted field names can never reach the query.
+UPDATABLE_EXPERIMENT_FIELDS = frozenset(
+    {"title", "hypothesis", "config", "code_ref", "dataset",
+     "status", "metrics", "artifacts", "notes"}
+)
+JSON_EXPERIMENT_FIELDS = frozenset({"config", "metrics", "artifacts"})
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
     channel_id     TEXT PRIMARY KEY,
@@ -203,13 +212,20 @@ class EpisodicStore:
             return row["id"] if row else None
 
     async def update_experiment(self, experiment_id: int, **fields) -> None:
+        # Validate before anything else (and before the enabled short-circuit)
+        # so unknown columns are always rejected, never silently ignored.
+        unknown = set(fields) - UPDATABLE_EXPERIMENT_FIELDS
+        if unknown:
+            raise ValueError(
+                f"Unknown experiment field(s): {', '.join(sorted(unknown))}. "
+                f"Allowed: {', '.join(sorted(UPDATABLE_EXPERIMENT_FIELDS))}."
+            )
         if not self.enabled or not fields:
             return
-        json_cols = {"config", "metrics", "artifacts"}
         sets, values = [], []
         for col, val in fields.items():
             sets.append(f"{col} = %s")
-            values.append(json.dumps(val) if col in json_cols else val)
+            values.append(json.dumps(val) if col in JSON_EXPERIMENT_FIELDS else val)
         values.append(experiment_id)
         async with self.pool.connection() as conn:
             await conn.execute(

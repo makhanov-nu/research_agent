@@ -72,6 +72,43 @@ def _flatten(content) -> str:
     return content if isinstance(content, str) else str(content)
 
 
+class PerKeyLocks:
+    """Lazily-created asyncio locks keyed by a string (e.g. a thread id).
+
+    Used to serialize graph invocations within a channel while letting
+    different channels run concurrently. Locks are kept for the process
+    lifetime; the key space (Discord channels) is small and bounded in practice.
+    """
+
+    def __init__(self):
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def get(self, key: str) -> asyncio.Lock:
+        lock = self._locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[key] = lock
+        return lock
+
+
+def checkpoint_result_message(memory_configured: bool, semantic_saved: bool) -> str:
+    """User-facing result for !checkpoint, honest about where the summary went."""
+    if not memory_configured:
+        return (
+            "Checkpointed and reset the live context. Memory isn't configured, "
+            "so the summary wasn't stored anywhere durable."
+        )
+    if semantic_saved:
+        return (
+            "Checkpointed. Summary saved to long-term (semantic) memory and the "
+            "conversation store; live context reset."
+        )
+    return (
+        "Checkpointed and reset the live context. Semantic memory is disabled, "
+        "so I saved the summary only in the conversation store."
+    )
+
+
 class ResearchBot(discord.Client):
     def __init__(self, **kwargs):
         intents = discord.Intents.default()
@@ -82,6 +119,8 @@ class ResearchBot(discord.Client):
         self.llm = None
         self._pool = None
         self._maintenance_task: asyncio.Task | None = None
+        # Serialize graph/state operations per channel (see issue: ordering).
+        self._channel_locks = PerKeyLocks()
 
     async def setup_hook(self) -> None:
         self.llm = get_llm()
@@ -107,6 +146,20 @@ class ResearchBot(discord.Client):
 
     async def on_ready(self) -> None:
         logger.info("Logged in as %s (id=%s)", self.user, self.user.id)
+
+    def _spawn_background(self, coro, description: str) -> asyncio.Task:
+        """Run a fire-and-forget coroutine, logging any exception it raises."""
+        task = self.loop.create_task(coro)
+
+        def _log_exception(t: asyncio.Task) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error("Background task failed: %s", description, exc_info=exc)
+
+        task.add_done_callback(_log_exception)
+        return task
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author == self.user or message.author.bot:
@@ -137,12 +190,16 @@ class ResearchBot(discord.Client):
 
     async def _handle_chat(self, message, content, config, thread_id) -> None:
         try:
-            async with message.channel.typing():
-                result = await self.graph.ainvoke(
-                    {"messages": [("user", content)]}, config=config
-                )
+            # Serialize per channel so concurrent messages in the same thread
+            # don't race on shared checkpoint/memory state.
+            async with self._channel_locks.get(thread_id):
+                async with message.channel.typing():
+                    result = await self.graph.ainvoke(
+                        {"messages": [("user", content)]}, config=config
+                    )
             reply = _flatten(result["messages"][-1].content)
             cumulative = result.get("cumulative_tokens", 0)
+            summary = result.get("summary") or ""
         except Exception:  # noqa: BLE001
             logger.exception("Error handling message")
             await message.channel.send(
@@ -153,10 +210,15 @@ class ResearchBot(discord.Client):
         for chunk in _chunk(reply):
             await message.channel.send(chunk)
 
-        # Persist the exchange to memory without blocking the reply.
+        # Persist the exchange to memory without blocking the reply. Passing the
+        # current summary keeps the durable episodic summary in sync with any
+        # auto-summarization that happened this turn (so idle archival has it).
         if self.memory is not None:
-            self.loop.create_task(
-                self.memory.remember(thread_id, content, reply, cumulative)
+            self._spawn_background(
+                self.memory.remember(
+                    thread_id, content, reply, cumulative, summary=summary
+                ),
+                f"memory.remember(channel={thread_id})",
             )
 
     async def _handle_command(self, message, content, config) -> None:
@@ -180,32 +242,42 @@ class ResearchBot(discord.Client):
             await message.channel.send(f"Unknown command `!{cmd}`.\n\n{HELP_TEXT}")
 
     async def _checkpoint(self, message, config) -> None:
+        from langchain_core.messages import RemoveMessage
+
         thread_id = config["configurable"]["thread_id"]
-        snapshot = await self.graph.aget_state(config)
-        messages = snapshot.values.get("messages", []) if snapshot else []
-        if not messages:
-            await message.channel.send("Nothing to checkpoint yet.")
-            return
 
-        async with message.channel.typing():
-            summary = await summarize_messages(
-                self.llm, messages, snapshot.values.get("summary", "")
-            )
-            from langchain_core.messages import RemoveMessage
+        # Hold the channel lock across read-summarize-reset so it can't
+        # interleave with a concurrent chat turn on the same thread.
+        async with self._channel_locks.get(thread_id):
+            snapshot = await self.graph.aget_state(config)
+            messages = snapshot.values.get("messages", []) if snapshot else []
+            if not messages:
+                await message.channel.send("Nothing to checkpoint yet.")
+                return
 
-            removes = [RemoveMessage(id=m.id) for m in messages if getattr(m, "id", None)]
-            await self.graph.aupdate_state(config, {"summary": summary, "messages": removes})
-
-            if self.memory is not None:
-                await self.memory.episodic.set_summary(thread_id, summary)
-                await asyncio.to_thread(
-                    self.memory.semantic.remember,
-                    "Conversation checkpoint:",
-                    summary,
-                    f"channel:{thread_id}",
+            semantic_saved = False
+            async with message.channel.typing():
+                summary = await summarize_messages(
+                    self.llm, messages, snapshot.values.get("summary", "")
+                )
+                removes = [
+                    RemoveMessage(id=m.id) for m in messages if getattr(m, "id", None)
+                ]
+                await self.graph.aupdate_state(
+                    config, {"summary": summary, "messages": removes}
                 )
 
+                if self.memory is not None:
+                    await self.memory.episodic.set_summary(thread_id, summary)
+                    if self.memory.semantic.enabled:
+                        await asyncio.to_thread(
+                            self.memory.semantic.remember,
+                            "Conversation checkpoint:",
+                            summary,
+                            f"channel:{thread_id}",
+                        )
+                        semantic_saved = True
+
         await message.channel.send(
-            "Checkpointed. Summary saved to long-term memory and the live "
-            "context was reset."
+            checkpoint_result_message(self.memory is not None, semantic_saved)
         )

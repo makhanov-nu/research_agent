@@ -9,7 +9,9 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: research_agent
     ports:
-      - "5432:5432"
+      # Bind to localhost only: the bot runs on the same host. Do not expose
+      # Postgres on the public interface.
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
