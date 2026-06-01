@@ -1,52 +1,119 @@
 """LangGraph definition for the research agent.
 
-A standard tool-using (ReAct) loop:
+    START -> load_context -> agent -> (tools -> agent)* -> END
 
-    START -> agent -> (tools? -> agent)* -> END
-
-The agent node calls the LLM; if it requests tools, the ToolNode runs them and
-control returns to the agent. Tools are loaded from MCP servers at build time,
-so building the graph is async.
+`load_context` manages memory each turn: it rolls older messages into a summary
+when context grows past a threshold (saving tokens), recalls relevant facts +
+learned procedures, tracks a monotonic token count, and raises a "checkpoint?"
+nudge each time the conversation crosses a 20k-token band. The `agent` node then
+builds its system prompt from the base persona plus that live memory context.
 """
 
 from __future__ import annotations
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
+from ..config import settings
 from ..llm import get_llm
 from ..mcp_client import load_mcp_tools
-from ..prompts import SYSTEM_PROMPT
+from ..memory.summarize import messages_to_drop, summarize_messages
+from ..memory.tokens import (
+    crossed_nudge_boundary,
+    estimate_message_tokens,
+    estimate_text_tokens,
+    _content_to_text,
+)
+from ..prompts import compose_system_prompt
 from .state import AgentState
 
 
-async def build_graph(checkpointer: BaseCheckpointSaver | None = None):
+def _latest_text(messages: list, message_type) -> str:
+    for m in reversed(messages):
+        if isinstance(m, message_type):
+            return _content_to_text(m.content)
+    return ""
+
+
+async def build_graph(
+    checkpointer: BaseCheckpointSaver | None = None, memory=None
+):
     """Build and compile the research agent graph.
 
     Args:
-        checkpointer: Persistence backend for conversation state. Defaults to an
-            in-memory saver (per-process; resets on restart).
+        checkpointer: persistence backend for conversation state.
+        memory: a MemoryManager, or None to run without long-term memory.
     """
     tools = await load_mcp_tools()
     llm = get_llm()
     llm_with_tools = llm.bind_tools(tools) if tools else llm
 
+    async def load_context(state: AgentState) -> dict:
+        messages = state["messages"]
+        summary = state.get("summary", "")
+        updates: dict = {}
+
+        # 1) Roll older messages into the summary when live context is large.
+        live_tokens = estimate_message_tokens(messages) + estimate_text_tokens(summary)
+        if (
+            live_tokens > settings.summary_token_threshold
+            and len(messages) > settings.summary_keep_last
+        ):
+            older = messages[: -settings.summary_keep_last]
+            summary = await summarize_messages(llm, older, summary)
+            updates["summary"] = summary
+            updates["messages"] = messages_to_drop(messages, settings.summary_keep_last)
+
+        # 2) Recall facts + learned procedures relevant to the latest user turn.
+        query = _latest_text(messages, HumanMessage)
+        if memory is not None:
+            updates["context_block"] = await memory.build_context(query)
+        else:
+            updates["context_block"] = ""
+
+        # 3) Monotonic conversation-size estimate -> 20k nudge bands.
+        delta = estimate_text_tokens(query) + estimate_text_tokens(
+            _latest_text(messages, AIMessage)
+        )
+        cumulative = state.get("cumulative_tokens", 0) + delta
+        updates["cumulative_tokens"] = cumulative
+
+        last_nudge = state.get("last_nudge_tokens", 0)
+        if crossed_nudge_boundary(cumulative, last_nudge, settings.nudge_every_tokens):
+            approx_k = round(cumulative / 1000)
+            updates["nudge"] = (
+                f"This conversation is now ~{approx_k}k tokens long. Briefly let the "
+                "researcher know, and ask whether they'd like you to summarize and "
+                "checkpoint it to long-term memory (they can reply or use "
+                "`!checkpoint`). Then continue with their request."
+            )
+            updates["last_nudge_tokens"] = cumulative
+        else:
+            updates["nudge"] = ""
+
+        return updates
+
     async def agent_node(state: AgentState) -> dict:
-        messages = [SystemMessage(content=SYSTEM_PROMPT), *state["messages"]]
+        system = compose_system_prompt(
+            summary=state.get("summary", ""),
+            context_block=state.get("context_block", ""),
+            nudge=state.get("nudge", ""),
+        )
+        messages = [SystemMessage(content=system), *state["messages"]]
         response = await llm_with_tools.ainvoke(messages)
         return {"messages": [response]}
 
     builder = StateGraph(AgentState)
+    builder.add_node("load_context", load_context)
     builder.add_node("agent", agent_node)
-    builder.add_edge(START, "agent")
+    builder.add_edge(START, "load_context")
+    builder.add_edge("load_context", "agent")
 
     if tools:
         builder.add_node("tools", ToolNode(tools))
-        # tools_condition routes to "tools" when the LLM requested a tool call,
-        # otherwise to END.
         builder.add_conditional_edges("agent", tools_condition)
         builder.add_edge("tools", "agent")
     else:

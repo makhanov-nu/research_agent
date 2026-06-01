@@ -33,4 +33,23 @@ HOW TO WORK:
     steps. Honesty over flattery.
   - You are talking over Discord, so keep responses focused and skimmable: short
     paragraphs and bullet lists, no walls of text.
+
+MEMORY:
+  - You have long-term memory. Facts recalled from it, and a running summary of
+    earlier conversation, may be supplied below. Treat recalled facts as prior
+    knowledge, but prefer fresh sources when they conflict, and note staleness.
 """
+
+
+def compose_system_prompt(
+    summary: str = "", context_block: str = "", nudge: str = ""
+) -> str:
+    """Assemble the full system prompt from the base persona plus live memory."""
+    parts = [SYSTEM_PROMPT]
+    if context_block:
+        parts.append("=== Recalled memory ===\n" + context_block)
+    if summary:
+        parts.append("=== Summary of earlier conversation ===\n" + summary)
+    if nudge:
+        parts.append("=== Context note (act on this) ===\n" + nudge)
+    return "\n\n".join(parts)

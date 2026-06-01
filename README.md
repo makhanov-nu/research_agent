@@ -10,13 +10,34 @@ by default for the model, and gets its external capabilities from **MCP
 servers** (starting with [paperclip](https://paperclip.gxl.ai) for full-text
 papers, clinical trials, and regulatory documents).
 
-## Status — Milestone 1
+## Status
 
-Working now:
+**Milestone 1 — Discord + literature (done)**
 
 - Discord bot ↔ agent ↔ literature (via MCP).
-- Tool-using (ReAct) LangGraph loop with per-channel conversation memory.
+- Tool-using (ReAct) LangGraph loop.
 - Pluggable MCP servers: paperclip built in, plus a JSON config for adding more.
+
+**Milestone 2 — Memory (done)**
+
+A memory subsystem on **Postgres + pgvector**, organized by the
+semantic / episodic / procedural framework:
+
+- **Semantic** (facts) — [mem0](https://github.com/mem0ai/mem0) over pgvector,
+  with built-in entity linking and citation/provenance on every fact. OpenAI
+  embeddings (Anthropic has no embeddings API).
+- **Episodic** (experiences) — a Postgres "lab notebook": action log, per-channel
+  activity, and an **experiment registry** (config, metrics, status, artifacts).
+- **Procedural** (instructions) — learned preferences/procedures prepended to the
+  system prompt (`!remember <text>`).
+- **Working memory** — durable LangGraph **Postgres checkpointer** (survives restarts).
+- **Token management** — rolling auto-summarization keeps live context small; a
+  **20k-token nudge** asks whether to checkpoint to long-term memory; `!checkpoint`
+  forces it.
+- **Maintenance loop** — archives channels idle > 7 days into long-term memory and
+  runs a **consolidation/reflection** pass (episodic → semantic insights).
+
+Memory is optional: without `DATABASE_URL` the bot runs on in-process state.
 
 Roadmap (not yet wired up):
 
@@ -38,18 +59,38 @@ Discord  ──►  ResearchBot  ──►  LangGraph agent  ──►  MCP tool
 src/research_agent/
   config.py          # settings via env / .env
   llm.py             # provider-agnostic model factory (Anthropic default)
-  prompts.py         # system prompt / persona
+  prompts.py         # system prompt / persona + prompt composer
   mcp_client.py      # load tools from MCP servers
+  db.py              # Postgres pool + durable checkpointer
   agent/
-    state.py         # graph state
-    graph.py         # the ReAct graph (async build)
+    state.py         # graph state (messages + memory bookkeeping)
+    graph.py         # load_context -> agent -> tools loop
+  memory/
+    manager.py       # one interface over the three stores
+    semantic.py      # facts (mem0 / pgvector)
+    episodic.py      # experiences (lab notebook + experiment registry)
+    procedural.py    # instructions (learned preferences/procedures)
+    summarize.py     # rolling summarization
+    tokens.py        # token estimate + nudge boundaries
+    maintenance.py   # idle archival + consolidation/reflection
   discord_bot/
-    bot.py           # Discord client -> graph bridge
+    bot.py           # Discord client -> graph bridge, commands
   cli.py             # local terminal REPL (no Discord)
   main.py            # entrypoint: runs the Discord bot
 mcp_servers.example.json  # template for adding more MCP servers
-docker/              # (planned) experiment sandbox
+docker-compose.yml        # Postgres + pgvector for memory
+docker/                   # (planned) experiment sandbox
 ```
+
+## Memory setup
+
+```bash
+docker compose up -d            # Postgres + pgvector
+pip install -e ".[memory]"      # mem0, postgres checkpointer, psycopg
+```
+
+Then set `DATABASE_URL` and `OPENAI_API_KEY` in `.env`. Schema is created
+automatically on first run. Commands: `!checkpoint`, `!remember <text>`, `!help`.
 
 ## Setup
 
