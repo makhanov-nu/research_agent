@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from urllib.parse import urlparse, unquote
 
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Populate os.environ from .env so SDKs that read the environment directly
+# (Anthropic, OpenAI) pick up their keys. Does not override real env vars,
+# so systemd/shell-provided values still win.
+load_dotenv()
 
 
 class Settings(BaseSettings):
