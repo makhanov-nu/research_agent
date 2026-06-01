@@ -20,6 +20,7 @@ env/
 # Checkpointer / runtime data
 data/
 workspace/
+artifacts/
 
 # OS / editors
 .DS_Store

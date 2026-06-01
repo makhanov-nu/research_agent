@@ -35,6 +35,9 @@ HELP_TEXT = (
     "`!checkpoint` (or `!summarize`) — summarize this thread to long-term "
     "memory and reset the live context\n"
     "`!remember <text>` — store a durable preference/instruction\n"
+    "`!runs` — list experiments and their status\n"
+    "`!approve <id>` — approve and launch a pending experiment\n"
+    "`!cancel <id>` — cancel a running experiment\n"
     "`!help` — this message\n\n"
     "Otherwise, just talk to me — DM or @-mention."
 )
@@ -116,9 +119,11 @@ class ResearchBot(discord.Client):
         super().__init__(intents=intents, **kwargs)
         self.graph = None
         self.memory: MemoryManager | None = None
+        self.experiments = None
         self.llm = None
         self._pool = None
         self._maintenance_task: asyncio.Task | None = None
+        self._poller_task: asyncio.Task | None = None
         # Serialize graph/state operations per channel (see issue: ordering).
         self._channel_locks = PerKeyLocks()
 
@@ -134,12 +139,31 @@ class ResearchBot(discord.Client):
                 run_loop(self.memory, self.llm)
             )
 
-        self.graph = await build_graph(checkpointer, self.memory)
-        logger.info("Research agent ready (memory=%s).", bool(self.memory))
+        # The experiment runner needs the registry (episodic store), so it's
+        # only available when memory is configured.
+        if settings.compute_enabled and self.memory is not None:
+            from ..experiments.runner import ExperimentRunner
+            from ..experiments.ssh_docker import SSHDockerBackend
+            from ..experiments.workspace import Workspace
+
+            self.experiments = ExperimentRunner(
+                self.memory.episodic,
+                SSHDockerBackend(),
+                Workspace(settings.experiment_workspace_dir),
+                settings.experiment_artifacts_dir,
+            )
+            self._poller_task = self.loop.create_task(self._run_job_poller())
+
+        self.graph = await build_graph(checkpointer, self.memory, self.experiments)
+        logger.info(
+            "Research agent ready (memory=%s, experiments=%s).",
+            bool(self.memory), bool(self.experiments),
+        )
 
     async def close(self) -> None:
-        if self._maintenance_task:
-            self._maintenance_task.cancel()
+        for task in (self._maintenance_task, self._poller_task):
+            if task:
+                task.cancel()
         if self._pool is not None:
             await self._pool.close()
         await super().close()
@@ -160,6 +184,29 @@ class ResearchBot(discord.Client):
 
         task.add_done_callback(_log_exception)
         return task
+
+    async def _run_job_poller(self) -> None:
+        """Periodically check active experiments and report completions."""
+        while True:
+            try:
+                for change in await self.experiments.poll_active():
+                    await self._report_state_change(change)
+            except Exception:  # noqa: BLE001
+                logger.exception("Job poller iteration failed")
+            await asyncio.sleep(settings.job_poll_interval_seconds)
+
+    async def _report_state_change(self, change) -> None:
+        if not change.channel_id:
+            return
+        channel = self.get_channel(int(change.channel_id))
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(int(change.channel_id))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                logger.warning("Cannot reach channel %s to report", change.channel_id)
+                return
+        for chunk in _chunk(change.message):
+            await channel.send(chunk)
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author == self.user or message.author.bot:
@@ -238,8 +285,35 @@ class ResearchBot(discord.Client):
                 await message.channel.send("Noted — I'll remember that.")
             else:
                 await message.channel.send("Memory isn't configured, so I can't store that.")
+        elif cmd in {"runs", "approve", "cancel"}:
+            await self._handle_experiment_command(message, cmd, arg.strip())
         else:
             await message.channel.send(f"Unknown command `!{cmd}`.\n\n{HELP_TEXT}")
+
+    async def _handle_experiment_command(self, message, cmd, arg) -> None:
+        if self.experiments is None:
+            await message.channel.send("Experiment runner isn't configured.")
+            return
+
+        if cmd == "runs":
+            rows = await self.memory.episodic.list_experiments(limit=15)
+            if not rows:
+                await message.channel.send("No experiments yet.")
+                return
+            lines = [f"#{r['id']} [{r['status']}] {r['title']}" for r in rows]
+            await message.channel.send("**Experiments**\n" + "\n".join(lines))
+            return
+
+        if not arg.isdigit():
+            await message.channel.send(f"Usage: `!{cmd} <experiment_id>`")
+            return
+        exp_id = int(arg)
+        async with message.channel.typing():
+            if cmd == "approve":
+                result = await self.experiments.approve_and_launch(exp_id)
+            else:  # cancel
+                result = await self.experiments.cancel(exp_id)
+        await message.channel.send(result)
 
     async def _checkpoint(self, message, config) -> None:
         from langchain_core.messages import RemoveMessage

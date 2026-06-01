@@ -39,15 +39,22 @@ def _latest_text(messages: list, message_type) -> str:
 
 
 async def build_graph(
-    checkpointer: BaseCheckpointSaver | None = None, memory=None
+    checkpointer: BaseCheckpointSaver | None = None, memory=None,
+    experiment_runner=None,
 ):
     """Build and compile the research agent graph.
 
     Args:
         checkpointer: persistence backend for conversation state.
         memory: a MemoryManager, or None to run without long-term memory.
+        experiment_runner: an ExperimentRunner whose tools are exposed to the
+            model, or None to run without experiment tooling.
     """
     tools = await load_mcp_tools()
+    if experiment_runner is not None and experiment_runner.enabled:
+        from ..experiments.tools import build_experiment_tools
+
+        tools = [*tools, *build_experiment_tools(experiment_runner)]
     llm = get_llm()
     llm_with_tools = llm.bind_tools(tools) if tools else llm
 

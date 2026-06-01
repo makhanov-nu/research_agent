@@ -233,6 +233,26 @@ class EpisodicStore:
                 values,
             )
 
+    async def get_experiment(self, experiment_id: int) -> Optional[dict]:
+        if not self.enabled:
+            return None
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM experiments WHERE id = %s", (experiment_id,)
+            )
+            return await cur.fetchone()
+
+    async def list_active_experiments(self) -> list[dict]:
+        """Experiments still in flight (building or running)."""
+        if not self.enabled:
+            return []
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM experiments WHERE status IN ('building', 'running') "
+                "ORDER BY created_at"
+            )
+            return await cur.fetchall()
+
     async def list_experiments(self, channel_id: str | None = None, limit: int = 20) -> list[dict]:
         if not self.enabled:
             return []

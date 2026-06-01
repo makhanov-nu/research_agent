@@ -1,6 +1,9 @@
-# Experiment Runner — Design (draft)
+# Experiment Runner — Design
 
-Status: **proposed** — pending sign-off on the decisions in the last section.
+Status: **Phase 1 implemented** (decisions below signed off). The runner,
+`SSHDockerBackend`, workspace, registry wiring, agent tools, approval flow, and
+job poller are built and unit-tested. Not yet validated against a live compute
+node (configure one via `COMPUTE_SSH_*` to exercise dispatch end-to-end).
 
 ## Goal
 
@@ -145,14 +148,28 @@ worker subagents slot in without redesign.
 3. **Phase 3:** sweeps + worker subagents for parallel ablations.
 4. **Phase 4:** `HFJobsBackend`, budgets/auto-approval, richer sandboxing.
 
-## Decisions needed (sign-off)
+## Decisions (signed off)
 
-1. **Dispatch mechanism** — *recommend* `SSHDockerBackend` for v1 (matches the
-   SSH setup, no extra services), with the backend interface keeping a worker
-   API / HF Jobs pluggable later.
-2. **Compute target** — *recommend* own GPU VPS as primary + HF Hub for
-   datasets/artifacts. Add `HFJobsBackend` later if you want burst/managed GPUs.
-3. **Approval** — *recommend* human approval in Discord before each launch
-   (default), with an optional auto-approve budget. Or fully autonomous?
-4. **Code packaging** — *recommend* rsync the agent-authored workspace + run in a
-   pinned base image (Dockerfile/requirements only when custom deps are needed).
+1. **Dispatch** — `SSHDockerBackend` for v1; backend interface keeps a worker API
+   / HF Jobs pluggable later. ✅
+2. **Compute target** — own GPU VPS, registered via `COMPUTE_SSH_*` config; HF
+   Hub for datasets/artifacts; `HFJobsBackend` later. ✅
+3. **Approval** — human `!approve <id>` in Discord before each launch (default,
+   `EXPERIMENT_REQUIRE_APPROVAL`). ✅
+4. **Packaging** — rsync the agent-authored workspace + run in a pinned base
+   image; Dockerfile/requirements only for custom deps. ✅
+
+## Phase 1 — as built
+
+- `experiments/types.py` — JobSpec, JobHandle, JobStatus, Resources, JobState.
+- `experiments/backend.py` — `ComputeBackend` protocol.
+- `experiments/ssh_docker.py` — `SSHDockerBackend` + pure `build_docker_run_command`
+  / `parse_inspect_status` (unit-tested). Secrets via remote `--env-file`.
+- `experiments/workspace.py` — per-experiment workspaces with path-traversal guard.
+- `experiments/runner.py` — `ExperimentRunner`: propose → write_code → request_launch
+  → approve_and_launch → poll_active; state in the registry's `config` JSONB.
+- `experiments/tools.py` — agent tools (channel taken from injected RunnableConfig).
+- Bot: `!runs` / `!approve <id>` / `!cancel <id>`, plus a job poller that reports
+  completions to the originating channel.
+
+Next: Phase 2 (metrics streaming + richer findings + artifacts → HF Hub).

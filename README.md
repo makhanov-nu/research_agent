@@ -39,13 +39,24 @@ semantic / episodic / procedural framework:
 
 Memory is optional: without `DATABASE_URL` the bot runs on in-process state.
 
+**Milestone 3 — Experiment runner, Phase 1 (done)**
+
+Run experiments on a **separate GPU node** registered via config, dispatched
+over SSH + Docker. See [docs/experiment-runner.md](docs/experiment-runner.md).
+
+- Pluggable `ComputeBackend` (v1 `SSHDockerBackend`); workspace rsync'd up and
+  mounted, secrets via remote `--env-file`, outputs fetched as artifacts.
+- Lifecycle tracked in the experiment registry; background poller reports
+  completions to Discord.
+- Agent tools: propose / write code / launch / status / logs / cancel.
+- Human approval before each launch (`!approve <id>`), `!runs`, `!cancel <id>`.
+- Disabled unless `COMPUTE_SSH_HOST`/`COMPUTE_SSH_USER` are set.
+
 Roadmap (not yet wired up):
 
-- Methodology design & writing
-- Code generation for methods
-- Experiment execution in a **Docker sandbox** on the GCP server
-- Findings reports & paper drafting
-- Subagents for parallel deep-dives
+- Methodology design & writing; paper drafting
+- Experiment Phase 2+: metrics streaming, findings reports, artifacts → HF Hub
+- Subagents for parallel ablations
 
 ## Architecture
 

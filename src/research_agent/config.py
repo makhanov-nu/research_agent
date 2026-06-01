@@ -62,12 +62,37 @@ class Settings(BaseSettings):
     # How often (seconds) the background maintenance loop runs.
     maintenance_interval_seconds: int = 6 * 60 * 60
 
+    # --- Experiment compute node (registered via config) ---
+    # SSH target for the GPU box. When host+user are empty, the runner is off.
+    compute_ssh_host: str = ""
+    compute_ssh_user: str = ""
+    compute_ssh_port: int = 22
+    compute_ssh_key: str = ""  # private key path; empty -> default keys / agent
+    # Remote directory under which per-experiment workspaces/outputs live.
+    compute_workdir: str = "~/research_agent_runs"
+    # Default container image for runs (override per experiment).
+    compute_base_image: str = "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime"
+    # Default docker --gpus value ("all", "0", or "" to disable GPU access).
+    compute_default_gpus: str = "all"
+    # Local directory where the agent authors experiment code before dispatch.
+    experiment_workspace_dir: str = "workspace"
+    # Local directory where fetched experiment artifacts are stored.
+    experiment_artifacts_dir: str = "artifacts"
+    # Require a human approval in Discord before launching a run.
+    experiment_require_approval: bool = True
+    # How often (seconds) the job poller checks active runs.
+    job_poll_interval_seconds: int = 60
+
     # Name the agent answers to / signs off as.
     agent_name: str = "Beaker"
 
     @property
     def memory_enabled(self) -> bool:
         return bool(self.database_url)
+
+    @property
+    def compute_enabled(self) -> bool:
+        return bool(self.compute_ssh_host and self.compute_ssh_user)
 
     def pg_components(self) -> dict:
         """Parse database_url into the discrete fields mem0's pgvector wants."""
