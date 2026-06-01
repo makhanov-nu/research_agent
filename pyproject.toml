@@ -7,6 +7,7 @@ dependencies = [
     "langgraph>=0.2.50",
     "langchain-core>=0.3.0",
     "langchain-anthropic>=0.3.0",
+    "langchain-openai>=0.2",
     "langchain-mcp-adapters>=0.1.0",
     "discord.py>=2.4",
     "pydantic-settings>=2.4",
@@ -14,7 +15,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-openai = ["langchain-openai>=0.2"]
 memory = [
     "mem0ai>=0.1.40",
     "langgraph-checkpoint-postgres>=2.0",

@@ -15,6 +15,18 @@ def get_llm() -> BaseChatModel:
     """Build the chat model described by the current settings."""
     provider = settings.llm_provider.lower()
 
+    if provider == "openrouter":
+        # OpenRouter is OpenAI-compatible; route via ChatOpenAI + base_url.
+        from langchain_openai import ChatOpenAI
+
+        return ChatOpenAI(
+            model=settings.llm_model,
+            temperature=settings.llm_temperature,
+            max_tokens=settings.llm_max_tokens,
+            api_key=settings.openrouter_api_key or None,
+            base_url=settings.openrouter_base_url,
+        )
+
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
@@ -25,7 +37,6 @@ def get_llm() -> BaseChatModel:
         )
 
     if provider == "openai":
-        # Requires the optional `openai` extra: pip install -e ".[openai]"
         from langchain_openai import ChatOpenAI
 
         return ChatOpenAI(
@@ -36,5 +47,5 @@ def get_llm() -> BaseChatModel:
 
     raise ValueError(
         f"Unknown LLM_PROVIDER={settings.llm_provider!r}. "
-        "Supported: 'anthropic', 'openai'."
+        "Supported: 'openrouter', 'anthropic', 'openai'."
     )

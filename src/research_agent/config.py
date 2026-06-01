@@ -25,10 +25,16 @@ class Settings(BaseSettings):
     discord_token: str = ""
 
     # --- LLM ---
-    llm_provider: str = "anthropic"
-    llm_model: str = "claude-sonnet-4-6"
+    # Provider: "openrouter" (default), "anthropic", or "openai".
+    llm_provider: str = "openrouter"
+    # Model id in the provider's namespace. OpenRouter uses slugs like
+    # "anthropic/claude-sonnet-4.6"; Anthropic uses "claude-sonnet-4-6".
+    llm_model: str = "anthropic/claude-sonnet-4.6"
     llm_temperature: float = 0.2
     llm_max_tokens: int = 4096
+    # OpenRouter (OpenAI-compatible) credentials.
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
     # --- MCP servers (tools) ---
     paperclip_api_key: str = ""

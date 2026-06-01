@@ -18,6 +18,30 @@ from ..config import settings
 logger = logging.getLogger(__name__)
 
 
+def _llm_block() -> dict:
+    """mem0 LLM config mirroring the agent's provider.
+
+    OpenRouter is OpenAI-compatible, so it uses mem0's `openai` provider with a
+    custom base URL. The embedder stays on real OpenAI (OpenRouter has no
+    embeddings endpoint).
+    """
+    provider = settings.llm_provider.lower()
+    base = {"model": settings.llm_model, "temperature": 0.1, "max_tokens": 2000}
+
+    if provider == "openrouter":
+        return {
+            "provider": "openai",
+            "config": {
+                **base,
+                "api_key": settings.openrouter_api_key,
+                "openai_base_url": settings.openrouter_base_url,
+            },
+        }
+    if provider == "openai":
+        return {"provider": "openai", "config": base}
+    return {"provider": "anthropic", "config": base}
+
+
 def _build_config() -> dict:
     pg = settings.pg_components()
     return {
@@ -35,14 +59,7 @@ def _build_config() -> dict:
                 "hnsw": True,
             },
         },
-        "llm": {
-            "provider": "anthropic",
-            "config": {
-                "model": settings.llm_model,
-                "temperature": 0.1,
-                "max_tokens": 2000,
-            },
-        },
+        "llm": _llm_block(),
         "embedder": {
             "provider": "openai",
             "config": {
