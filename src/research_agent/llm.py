@@ -1,0 +1,40 @@
+"""Provider-agnostic LLM factory.
+
+LangGraph is provider-agnostic, so the model is chosen here and bound to tools
+in the graph. Swap providers via LLM_PROVIDER / LLM_MODEL in the environment.
+"""
+
+from __future__ import annotations
+
+from langchain_core.language_models import BaseChatModel
+
+from .config import settings
+
+
+def get_llm() -> BaseChatModel:
+    """Build the chat model described by the current settings."""
+    provider = settings.llm_provider.lower()
+
+    if provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+
+        return ChatAnthropic(
+            model=settings.llm_model,
+            temperature=settings.llm_temperature,
+            max_tokens=settings.llm_max_tokens,
+        )
+
+    if provider == "openai":
+        # Requires the optional `openai` extra: pip install -e ".[openai]"
+        from langchain_openai import ChatOpenAI
+
+        return ChatOpenAI(
+            model=settings.llm_model,
+            temperature=settings.llm_temperature,
+            max_tokens=settings.llm_max_tokens,
+        )
+
+    raise ValueError(
+        f"Unknown LLM_PROVIDER={settings.llm_provider!r}. "
+        "Supported: 'anthropic', 'openai'."
+    )

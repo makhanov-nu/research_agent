@@ -1,0 +1,20 @@
+{
+  "_comment": "Copy to mcp_servers.json to add MCP servers beyond the built-in paperclip. ${VAR} is substituted from the environment. Supported transports: streamable_http, sse, stdio.",
+  "mcpServers": {
+    "example_http_server": {
+      "url": "https://example.com/mcp",
+      "transport": "streamable_http",
+      "headers": {
+        "Authorization": "Bearer ${SOME_API_KEY}"
+      }
+    },
+    "example_stdio_server": {
+      "command": "uvx",
+      "args": ["some-mcp-server"],
+      "transport": "stdio",
+      "env": {
+        "API_KEY": "${SOME_API_KEY}"
+      }
+    }
+  }
+}

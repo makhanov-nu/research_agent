@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Secrets / local config
+.env
+*.db
+*.sqlite
+*.sqlite3
+
+# Checkpointer / runtime data
+data/
+workspace/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
