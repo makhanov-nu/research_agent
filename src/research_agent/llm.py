@@ -49,3 +49,22 @@ def get_llm() -> BaseChatModel:
         f"Unknown LLM_PROVIDER={settings.llm_provider!r}. "
         "Supported: 'openrouter', 'anthropic', 'openai'."
     )
+
+
+def build_openrouter_chat(
+    model: str, temperature: float = 0.6, max_tokens: int = 4096
+) -> BaseChatModel:
+    """Build a ChatOpenAI bound to a specific OpenRouter model slug.
+
+    Used by the ideation consortium to talk to several models through the one
+    OpenRouter key, independent of the agent's default provider.
+    """
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        api_key=settings.openrouter_api_key or None,
+        base_url=settings.openrouter_base_url,
+    )

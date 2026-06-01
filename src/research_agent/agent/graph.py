@@ -40,7 +40,7 @@ def _latest_text(messages: list, message_type) -> str:
 
 async def build_graph(
     checkpointer: BaseCheckpointSaver | None = None, memory=None,
-    experiment_runner=None,
+    experiment_runner=None, mcp_tools=None,
 ):
     """Build and compile the research agent graph.
 
@@ -49,8 +49,11 @@ async def build_graph(
         memory: a MemoryManager, or None to run without long-term memory.
         experiment_runner: an ExperimentRunner whose tools are exposed to the
             model, or None to run without experiment tooling.
+        mcp_tools: preloaded MCP tools to reuse (avoids a second connection);
+            loaded here when not provided.
     """
-    mcp_tools = await load_mcp_tools()
+    if mcp_tools is None:
+        mcp_tools = await load_mcp_tools()
     tools = list(mcp_tools)
 
     # Writing tools: the lit-review subagent reuses the literature (MCP) tools.

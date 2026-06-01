@@ -86,6 +86,22 @@ class Settings(BaseSettings):
     experiment_artifacts_dir: str = "artifacts"
     # Directory for written outputs (LaTeX literature reviews, drafts, etc.).
     output_dir: str = "outputs"
+
+    # --- Ideation consortium (multi-model debate via OpenRouter) ---
+    # Comma-separated OpenRouter model slugs forming the panel.
+    consortium_models: str = (
+        "anthropic/claude-opus-4.7,openai/gpt-5.5,"
+        "google/gemini-3-pro,deepseek/deepseek-r1"
+    )
+    # The model that synthesizes the final ideas.
+    consortium_chair_model: str = "anthropic/claude-opus-4.7"
+    consortium_temperature: float = 0.6
+    # Number of debate rounds after the opening proposals.
+    consortium_rounds: int = 1
+
+    @property
+    def panel_models(self) -> list[str]:
+        return [m.strip() for m in self.consortium_models.split(",") if m.strip()]
     # Require a human approval in Discord before launching a run.
     experiment_require_approval: bool = True
     # How often (seconds) the job poller checks active runs.

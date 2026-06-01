@@ -39,6 +39,7 @@ HELP_TEXT = (
     "`!approve <id>` — approve and launch a pending experiment\n"
     "`!cancel <id>` — cancel a running experiment\n"
     "`!getfile <path>` — fetch a written output (e.g. a drafted LaTeX review)\n"
+    "`!ideate <topic>` — convene the multi-model consortium to propose 3 Q1 ideas\n"
     "`!help` — this message\n\n"
     "Otherwise, just talk to me — DM or @-mention."
 )
@@ -121,6 +122,7 @@ class ResearchBot(discord.Client):
         self.graph = None
         self.memory: MemoryManager | None = None
         self.experiments = None
+        self.consortium = None
         self.llm = None
         self._pool = None
         self._maintenance_task: asyncio.Task | None = None
@@ -155,10 +157,26 @@ class ResearchBot(discord.Client):
             )
             self._poller_task = self.loop.create_task(self._run_job_poller())
 
-        self.graph = await build_graph(checkpointer, self.memory, self.experiments)
+        # Load MCP tools once and share them with the graph and the consortium.
+        from ..mcp_client import load_mcp_tools
+
+        mcp_tools = await load_mcp_tools()
+
+        if settings.openrouter_api_key:
+            from ..consortium import Consortium
+
+            self.consortium = Consortium(
+                mcp_tools, settings.panel_models, settings.consortium_chair_model,
+                settings.output_dir, settings.consortium_temperature,
+                settings.consortium_rounds,
+            )
+
+        self.graph = await build_graph(
+            checkpointer, self.memory, self.experiments, mcp_tools=mcp_tools
+        )
         logger.info(
-            "Research agent ready (memory=%s, experiments=%s).",
-            bool(self.memory), bool(self.experiments),
+            "Research agent ready (memory=%s, experiments=%s, consortium=%s).",
+            bool(self.memory), bool(self.experiments), bool(self.consortium),
         )
 
     async def close(self) -> None:
@@ -290,8 +308,40 @@ class ResearchBot(discord.Client):
             await self._handle_experiment_command(message, cmd, arg.strip())
         elif cmd == "getfile":
             await self._send_file(message, arg.strip())
+        elif cmd == "ideate":
+            await self._ideate(message, arg.strip())
         else:
             await message.channel.send(f"Unknown command `!{cmd}`.\n\n{HELP_TEXT}")
+
+    async def _ideate(self, message, topic) -> None:
+        if self.consortium is None:
+            await message.channel.send(
+                "The consortium isn't configured (needs OPENROUTER_API_KEY)."
+            )
+            return
+        if not topic:
+            await message.channel.send("Usage: `!ideate <topic>`")
+            return
+
+        models = ", ".join(self.consortium.panel)
+        await message.channel.send(
+            f"Convening the consortium on **{topic}**.\n"
+            f"Panel: {models}. They'll ground in the literature, then "
+            "propose → debate → synthesize. This takes a few minutes…"
+        )
+        try:
+            async with message.channel.typing():
+                result = await self.consortium.ideate(topic)
+        except Exception:  # noqa: BLE001
+            logger.exception("Consortium failed")
+            await message.channel.send("The consortium hit an error. Check the logs.")
+            return
+
+        for chunk in _chunk(result["ideas"]):
+            await message.channel.send(chunk)
+        await message.channel.send(
+            f"Full shared-session transcript: `!getfile {result['rel_path']}`"
+        )
 
     async def _send_file(self, message, relpath: str) -> None:
         if not relpath:
