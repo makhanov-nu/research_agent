@@ -27,3 +27,7 @@ outputs/
 .DS_Store
 .idea/
 .vscode/
+
+# MkDocs build output
+site/
+.cache/

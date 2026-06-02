@@ -1,0 +1,92 @@
+site_name: Research Agent
+site_description: A personal, autonomous, agentic research partner — literature, ideation, experiments, and memory, over Discord.
+site_url: https://makhanov-nu.github.io/research_agent/
+repo_url: https://github.com/makhanov-nu/research_agent
+repo_name: makhanov-nu/research_agent
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - navigation.tracking
+    - toc.follow
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_root_heading: true
+            show_source: true
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+            heading_level: 2
+            filters: ["!^_"]
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Architecture: architecture.md
+  - Subsystems:
+      - Memory: memory.md
+      - Agents & tasks: agents-and-tasks.md
+      - Consortium: consortium.md
+      - Experiments: experiments.md
+      - Experiment runner (design): experiment-runner.md
+  - Discord commands: commands.md
+  - Deployment: deployment.md
+  - API reference:
+      - Overview: reference/index.md
+      - Configuration: reference/config.md
+      - Agents & dispatcher: reference/agents.md
+      - Memory: reference/memory.md
+      - Consortium: reference/consortium.md
+      - Experiments: reference/experiments.md
+      - Writing: reference/writing.md
