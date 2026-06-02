@@ -1,23 +1,60 @@
-# research_agent
+<div align="center">
 
-A personal, autonomous research agent. The goal: a collaborator that explores
-the literature, discusses and writes methodology, writes and runs the code for
-that methodology, runs experiments (HuggingFace / cloud compute), reports
-findings, innovates with you, and helps write the paper — reachable over Discord.
+# 🔬 research_agent
 
-It's built on **LangGraph** + **LangChain v1** (provider-agnostic orchestration),
-runs its models through **OpenRouter** by default (any Anthropic / OpenAI /
-Google / DeepSeek model), and gets its external capabilities from **MCP servers**
-(starting with [paperclip](https://paperclip.gxl.ai) for full-text papers,
-clinical trials, and regulatory documents).
+**A personal, autonomous research agent — explores the literature, designs and writes methodology, runs experiments, debates ideas with a multi-model panel, and helps write the paper. Reachable over Discord.**
 
-📚 **Documentation:** https://makhanov-nu.github.io/research_agent/
+![Orchestrator](https://img.shields.io/badge/architecture-orchestrator%20%2B%20subagents-7c3aed)
+![LangGraph](https://img.shields.io/badge/built%20on-LangGraph%20%2B%20LangChain%20v1-1f6feb)
+![OpenRouter](https://img.shields.io/badge/models-OpenRouter-10b981)
+![Discord](https://img.shields.io/badge/interface-Discord-5865F2)
+![Python](https://img.shields.io/badge/python-3.12-3776AB)
+![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-orange)
 
-## Architecture: orchestrator + subagents
+[Why](#-why) · [What it does](#-what-it-does) · [Architecture](#-architecture) · [Commands](#-commands) · [Memory](#-memory) · [Setup](#-setup) · [Docs](#-documentation)
 
-The Discord-facing agent is a thin **orchestrator**. Instead of doing everything
-itself, its tools *delegate* to specialized **subagents** and receive only their
-final results — keeping the orchestrator's context lean (divide and conquer).
+📚 **Docs:** https://makhanov-nu.github.io/research_agent/
+
+</div>
+
+---
+
+## 🤔 Why
+
+Research has too many moving parts to hold in one head — or one prompt. You read a
+dozen papers, lose the thread, re-derive the same methodology, and the experiment
+you ran last month is a folder you can't find.
+
+A single chat agent doesn't fix this. Its context overflows, it forgets, and it
+tries to do everything itself.
+
+**research_agent solves this by being a team.** A thin orchestrator talks to you on
+Discord and *delegates* to specialized subagents — each with its own context, tools,
+and job. Literature search, idea generation, methodology, experiments: divide and
+conquer. Everything it learns goes into durable memory, and every delegation is
+recorded on a task dashboard you can inspect.
+
+---
+
+## 📦 What it does
+
+| Capability | What you get |
+|---|---|
+| 📚 **Literature** | A research subagent owns the [paperclip](https://paperclip.gxl.ai) MCP tools and returns grounded, **cited** synthesis over papers, trials, and regulatory docs. |
+| 💡 **Ideation** (`!ideate`) | A multi-model **consortium** (Claude Opus, GPT-5.5, Gemini 3 Pro, DeepSeek-R1) grounds in the literature, then debates over a shared transcript and proposes **3 Q1-level ideas**. |
+| 📝 **LaTeX writing** | Drafts a literature review from related work and saves `.tex` / `.bib` to outputs. |
+| 🧪 **Experiments** | Runs jobs on a **separate GPU node** over SSH + Docker, with human approval before each launch. |
+| 🧠 **Memory** | Postgres + pgvector store organized by semantic / episodic / procedural — facts, a lab notebook, and learned preferences that persist across restarts. |
+| 📋 **Task dashboard** | Every delegation is recorded with its result *and* full trace (reasoning + tool calls). |
+
+---
+
+## 🏗 Architecture
+
+The Discord-facing agent is a thin **orchestrator**. Its tools *delegate* to
+specialized **subagents** and receive only their final results — keeping the
+orchestrator's context lean. Subagents run on LangChain v1 `create_agent`; their
+full reasoning is captured separately, not pushed back up.
 
 ```
                 ┌──────────────── Discord ────────────────┐
@@ -30,80 +67,103 @@ final results — keeping the orchestrator's context lean (divide and conquer).
  literature   LaTeX          consortium     experiment
  subagent     lit-review     (!ideate)      runner
  (paperclip   writer         multi-model    (SSH+Docker,
-  MCP)                        debate         GPU node)
+  MCP)                        debate          GPU node)
    │
-   └─ every delegation is recorded in the Postgres **task dashboard**
-      (result + full trace of reasoning & tool calls)
+   └─ every delegation → Postgres task dashboard (result + full trace)
 ```
 
-- **Subagents** run on LangChain v1 `create_agent` + middleware. A subagent
-  returns only its final answer to the orchestrator; its full reasoning and tool
-  calls are captured separately in the task `trace` column via
-  `TaskRecorderMiddleware`.
-- **Task dashboard** — a Postgres `tasks` table records every delegation
-  (input, status, result, trace, timings). Inspect with `!tasks` / `!task <id>`
-  / `!trace <id>`.
-- **Background dispatcher** — `dispatch_task(agent, task)` runs subagents
-  async/parallel (semaphore-capped at `MAX_PARALLEL_TASKS`). Completion is
-  **push-based**: when a task finishes it wakes the orchestrator with an event
-  (no polling).
+- **Subagents** return only their final answer; the full trace lands in the task
+  `trace` column via `TaskRecorderMiddleware`.
+- **Background dispatcher** runs subagents async/parallel (semaphore-capped). When a
+  task finishes it **wakes the orchestrator with an event** — push-based, no polling.
+- **Provider-agnostic** — models run through OpenRouter by default (swap any
+  Anthropic / OpenAI / Google / DeepSeek model via `LLM_MODEL`).
 
-## Capabilities
+---
 
-- **Literature** — a research subagent owns the paperclip MCP tools and returns
-  grounded, cited synthesis. (The orchestrator has no raw MCP access.)
-- **LaTeX literature review** — drafts a review from related work and saves
-  `.tex` / `.bib` to the outputs directory; fetch with `!getfile <path>`.
-- **Consortium** (`!ideate <topic>`) — convenes a multi-model panel (Claude Opus,
-  GPT-5.5, Gemini 3 Pro, DeepSeek-R1) that grounds itself in the literature, then
-  proposes / debates / argues over a **shared transcript** so the models hear each
-  other, and a chair synthesizes **3 Q1-level conference/journal ideas**.
-- **Experiment runner** — runs experiments on a **separate GPU node** registered
-  via config, dispatched over SSH + Docker, with human approval before each
-  launch. Dormant until `COMPUTE_SSH_*` is set. See
-  [docs/experiment-runner.md](docs/experiment-runner.md).
-
-## Memory
-
-A memory subsystem on **Postgres + pgvector**, organized by the
-semantic / episodic / procedural framework:
-
-- **Semantic** (facts) — [mem0](https://github.com/mem0ai/mem0) over pgvector,
-  with built-in entity linking and provenance on every fact. Embeddings via
-  OpenRouter (`openai/text-embedding-3-small`).
-- **Episodic** (experiences) — a Postgres "lab notebook": action log, per-channel
-  activity, and an **experiment registry** (config, metrics, status, artifacts).
-- **Procedural** (instructions) — learned preferences/procedures prepended to the
-  system prompt (`!remember <text>`).
-- **Working memory** — durable LangGraph **Postgres checkpointer** (survives restarts).
-- **Token management** — rolling auto-summarization keeps live context small; a
-  **20k-token nudge** asks whether to checkpoint to long-term memory; `!checkpoint`
-  forces it.
-- **Maintenance loop** — archives channels idle > 7 days into long-term memory and
-  runs a **consolidation/reflection** pass (episodic → semantic insights).
-
-Memory is optional: without `DATABASE_URL` the bot runs on in-process state.
-
-## Commands
+## 💬 Commands
 
 | Command | What it does |
 |---|---|
 | `!ideate <topic>` | Convene the multi-model consortium to propose 3 Q1 ideas |
-| `!tasks` / `!task <id>` / `!trace <id>` | The task dashboard: recent tasks, status+result, full trace export |
+| `!tasks` / `!task <id>` / `!trace <id>` | The dashboard: recent tasks, status+result, full trace export |
 | `!checkpoint` (`!summarize`) | Summarize this thread to long-term memory and reset live context |
 | `!remember <text>` | Store a durable preference/instruction |
 | `!getfile <path>` | Fetch a written output (e.g. a drafted LaTeX review) |
 | `!runs` / `!approve <id>` / `!cancel <id>` | List / approve+launch / cancel experiments |
 | `!help` | Show commands |
 
-Otherwise, just talk to it — DM or **@-mention** it in a channel.
+Otherwise, just talk to it — **DM** or **@-mention** it in a channel.
 
-## Project layout
+---
+
+## 🧠 Memory
+
+A memory subsystem on **Postgres + pgvector**, organized by the
+semantic / episodic / procedural framework:
+
+| Layer | Role |
+|---|---|
+| **Semantic** (facts) | [mem0](https://github.com/mem0ai/mem0) over pgvector, entity linking + provenance. Embeddings via OpenRouter (`openai/text-embedding-3-small`). |
+| **Episodic** (experiences) | A Postgres "lab notebook": action log, per-channel activity, **experiment registry** (config, metrics, status, artifacts). |
+| **Procedural** (instructions) | Learned preferences/procedures prepended to the prompt (`!remember`). |
+| **Working memory** | Durable LangGraph Postgres checkpointer (survives restarts). |
+
+**Token management:** rolling auto-summarization keeps live context small; a 20k-token
+nudge asks whether to checkpoint; `!checkpoint` forces it. **Maintenance loop:**
+archives channels idle > 7 days and runs a consolidation/reflection pass.
+
+> Memory is optional — without `DATABASE_URL` the bot runs on in-process state.
+
+---
+
+## ⚙️ Setup
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[memory]"   # core + memory; add ".[dev]" for tests, ".[docs]" for the docs site
+
+cp .env.example .env         # then fill in the values
+docker compose up -d         # Postgres + pgvector (for memory)
+```
+
+Required in `.env`:
+
+| Variable | Purpose |
+|---|---|
+| `DISCORD_TOKEN` | Your Discord bot token |
+| `OPENROUTER_API_KEY` | Model access via OpenRouter (default provider) |
+| `PAPERCLIP_API_KEY` | `gxl_...` key from https://paperclip.gxl.ai/keys |
+| `DATABASE_URL` | Postgres connection string (enables memory; schema auto-created) |
+
+The model is set via `LLM_MODEL` (default `anthropic/claude-sonnet-4.6`). To use the
+Anthropic/OpenAI APIs directly instead of OpenRouter, set `LLM_PROVIDER=anthropic`
+(+ `ANTHROPIC_API_KEY`) or `LLM_PROVIDER=openai` (+ `OPENAI_API_KEY`).
+
+**Discord bot:** create an app at the [Developer Portal](https://discord.com/developers/applications)
+→ Bot, enable the **Message Content Intent**, copy the token into `DISCORD_TOKEN`,
+and invite it (OAuth2 → scope `bot`, send-messages perms).
+
+### Run
+
+```bash
+research-agent                 # or: python -m research_agent.main   (Discord)
+python -m research_agent.cli   # local terminal REPL for testing
+```
+
+### Adding MCP servers
+
+Copy `mcp_servers.example.json` → `mcp_servers.json` and add entries. `${VAR}` is
+substituted from the environment. Transports: `streamable_http`, `sse`, `stdio`.
+
+---
+
+## 📂 Project layout
 
 ```
 src/research_agent/
   config.py          # settings via env / .env (OpenRouter default)
-  llm.py             # provider-agnostic model factory + per-model OpenRouter clients
+  llm.py             # provider-agnostic model factory + per-model clients
   prompts.py         # orchestrator system prompt + composer
   mcp_client.py      # load tools from MCP servers
   db.py              # Postgres pool + durable checkpointer
@@ -123,64 +183,21 @@ src/research_agent/
   discord_bot/bot.py # Discord client -> graph bridge, commands
   cli.py             # local terminal REPL (no Discord)
   main.py            # entrypoint: runs the Discord bot
-mcp_servers.example.json  # template for adding more MCP servers
-docker-compose.yml        # Postgres + pgvector for memory
-mkdocs.yml                # docs site (Material for MkDocs + mkdocstrings)
 ```
 
-## Setup
+---
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[memory]"   # core + memory; add ".[dev]" for tests, ".[docs]" for the docs site
+## 📚 Documentation
 
-cp .env.example .env         # then fill in the values
-docker compose up -d         # Postgres + pgvector (for memory)
-```
-
-Required in `.env`:
-
-- `DISCORD_TOKEN` — your Discord bot token
-- `OPENROUTER_API_KEY` — model access via OpenRouter (default provider)
-- `PAPERCLIP_API_KEY` — `gxl_...` key from https://paperclip.gxl.ai/keys
-- `DATABASE_URL` — Postgres connection string (enables memory; schema auto-created)
-
-The model is selected via `LLM_MODEL` (default `anthropic/claude-sonnet-4.6`).
-To run against the Anthropic or OpenAI APIs directly instead of OpenRouter, set
-`LLM_PROVIDER=anthropic` (+ `ANTHROPIC_API_KEY`) or `LLM_PROVIDER=openai`
-(+ `OPENAI_API_KEY`).
-
-### Discord bot setup
-
-1. Create an app at https://discord.com/developers/applications → **Bot**.
-2. Enable the **Message Content Intent**.
-3. Copy the bot token into `DISCORD_TOKEN`.
-4. Invite the bot to your server (OAuth2 → scope `bot`, with send-messages perms).
-
-## Run
-
-```bash
-research-agent                 # or: python -m research_agent.main   (Discord)
-python -m research_agent.cli   # local terminal REPL for testing
-```
-
-## Adding MCP servers
-
-Copy `mcp_servers.example.json` to `mcp_servers.json` and add entries. `${VAR}`
-is substituted from the environment. Supported transports: `streamable_http`,
-`sse`, `stdio`.
-
-## Documentation
-
-Built with **Material for MkDocs** + **mkdocstrings**, auto-deployed to GitHub
-Pages on every push to `main`.
+Built with **Material for MkDocs** + **mkdocstrings**, auto-deployed to GitHub Pages
+on every push to `main`.
 
 ```bash
 pip install -e ".[docs]"
 mkdocs serve     # live preview at http://127.0.0.1:8000
 ```
 
-## Tests
+## 🧪 Tests
 
 ```bash
 pip install -e ".[dev]"
