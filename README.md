@@ -58,21 +58,43 @@ specialized **subagents** and receive only their final results — keeping the
 orchestrator's context lean. Subagents run on LangChain v1 `create_agent`; their
 full reasoning is captured separately, not pushed back up.
 
+```mermaid
+flowchart TB
+    you([👤 Researcher])
+
+    subgraph discord [Discord]
+        you
+    end
+
+    subgraph orch [Orchestrator · LangGraph]
+        bot[ResearchBot]
+        mem[(🧠 Memory<br/>semantic · episodic · procedural)]
+        bot <--> mem
+    end
+
+    subgraph subs [Specialized subagents · create_agent + middleware]
+        lit[📚 Literature<br/>owns paperclip MCP]
+        review[📝 Lit-review writer]
+        method[📐 Methodology writer]
+        paper[📄 Paper writer]
+        cons[💡 Consortium<br/>multi-model debate]
+        exp[🧪 Experiment runner<br/>SSH + Docker · GPU node]
+    end
+
+    dash[(📋 Task dashboard<br/>Postgres: result + full trace)]
+
+    you -- DM / @-mention --> bot
+    bot -- "delegate (sync or background)" --> subs
+    subs -- "final result only" --> bot
+    bot -- responses / push events --> you
+    subs -. "result + reasoning + tool calls" .-> dash
+    lit -. external papers .-> paperclip[(paperclip MCP)]
 ```
-                ┌──────────────── Discord ────────────────┐
-                │                                          │
-                ▼                                          │ results / events
-        ResearchBot (orchestrator, LangGraph)              │
-                │  delegates via tools                     │
-   ┌────────────┼───────────────┬──────────────┬──────────┘
-   ▼            ▼               ▼              ▼
- literature   LaTeX          consortium     experiment
- subagent     lit-review     (!ideate)      runner
- (paperclip   writer         multi-model    (SSH+Docker,
-  MCP)                        debate          GPU node)
-   │
-   └─ every delegation → Postgres task dashboard (result + full trace)
-```
+
+> **How to read it:** the orchestrator delegates self-contained jobs to subagents
+> and gets back only their final result (the full reasoning/tool-call trace goes
+> to the dashboard, not the orchestrator's context). Heavy jobs run in the
+> background and **push** their result back when done.
 
 - **Subagents** return only their final answer; the full trace lands in the task
   `trace` column via `TaskRecorderMiddleware`.
