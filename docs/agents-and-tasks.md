@@ -17,8 +17,16 @@ Current delegation tools:
 | --- | --- | --- |
 | `research_literature(task)` | literature (owns paperclip) | a cited synthesis |
 | `draft_literature_review(...)` | LaTeX writer | a saved file path |
+| `design_methodology(...)` | LaTeX methodology writer | a saved file path |
+| `draft_paper(...)` | LaTeX paper writer | a saved file path |
 | `brainstorm_research_ideas(...)` | [consortium](consortium.md) | 3 Q1 ideas |
 | experiment tools | [experiments](experiments.md) | concise status |
+
+The three LaTeX writers (`writing/`) share a base (`writing/latex.py`): research
+the literature, return a `latex` (+ `bibtex`) block, parse, and save to disk
+under `outputs/{lit_reviews,methodology,papers}/`. A natural pipeline chains them:
+`research_literature → brainstorm_research_ideas → design_methodology →
+experiments → draft_paper`, feeding each stage forward.
 
 !!! tip "Adding a new agent"
     Write its system prompt, call `build_subagent_tool(...)`, register it in

@@ -24,7 +24,7 @@ Runner = Callable[[str], Awaitable[tuple[str, list]]]
 OnComplete = Callable[[int, str, str, str, "str | None"], Awaitable[None]]
 
 
-def build_runners(*, model, mcp_tools, reviewer, consortium) -> dict[str, Runner]:
+def build_runners(*, model, mcp_tools, writers, consortium) -> dict[str, Runner]:
     """Assemble the dispatchable subagent runners from available resources."""
     from .literature import build_literature_runner
 
@@ -33,12 +33,19 @@ def build_runners(*, model, mcp_tools, reviewer, consortium) -> dict[str, Runner
     if mcp_tools:
         runners["research_literature"] = build_literature_runner(model, mcp_tools)
 
-    async def _review(task: str) -> tuple[str, list]:
-        r = await reviewer.draft(task)
-        summary = f"Wrote a LaTeX literature review with {r['n_refs']} references: {r['tex_path']}"
-        return summary, [{"type": "artifact", "tex": r["tex_path"], "bib": r["bib_path"]}]
+    def _artifact_runner(writer, label):
+        async def _run(task: str) -> tuple[str, list]:
+            r = await writer.draft(task)
+            summary = f"Wrote a LaTeX {label} with {r['n_refs']} references: {r['tex_path']}"
+            return summary, [
+                {"type": "artifact", "tex": r["tex_path"], "bib": r["bib_path"]}
+            ]
 
-    runners["literature_review"] = _review
+        return _run
+
+    runners["literature_review"] = _artifact_runner(writers.reviewer, "literature review")
+    runners["methodology"] = _artifact_runner(writers.methodologist, "methodology")
+    runners["paper_draft"] = _artifact_runner(writers.paper_writer, "paper draft")
 
     if consortium is not None:
         async def _consortium(task: str) -> tuple[str, list]:

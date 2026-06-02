@@ -187,11 +187,11 @@ class ResearchBot(discord.Client):
         # task store to track them).
         if self.tasks is not None:
             from ..agents.dispatcher import TaskDispatcher, build_runners
-            from ..writing.lit_review import LiteratureReviewer
+            from ..writing import build_writers
 
-            reviewer = LiteratureReviewer(get_llm(), mcp_tools, settings.output_dir)
+            writers = build_writers(get_llm(), mcp_tools, settings.output_dir)
             runners = build_runners(
-                model=get_llm(), mcp_tools=mcp_tools, reviewer=reviewer,
+                model=get_llm(), mcp_tools=mcp_tools, writers=writers,
                 consortium=self.consortium,
             )
             self.dispatcher = TaskDispatcher(

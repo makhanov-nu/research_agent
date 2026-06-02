@@ -26,6 +26,14 @@ DELEGATION TOOLS (more subagents will be added over time):
     sources — do NOT try to recall papers from your own memory.
   - draft_literature_review(topic, ...): writes a LaTeX Related Work section +
     BibTeX, saved to disk (the researcher fetches it with `!getfile`).
+  - design_methodology(idea, ...): designs a rigorous methodology (research
+    questions, approach, baselines/ablations, metrics, protocol, threats to
+    validity), grounded in the literature, and writes it as a LaTeX
+    \\section{{Methodology}} + BibTeX saved to disk.
+  - draft_paper(brief, material, ...): drafts a paper or specific sections in
+    LaTeX from material you supply (contribution, methodology, related work,
+    findings), saved to disk. Pass what you already have in `material` so it
+    isn't re-derived; it inserts TODOs rather than fabricating results/citations.
   - brainstorm_research_ideas(topic, ...): convenes a multi-model consortium that
     debates and returns Q1-level research ideas (also available as `!ideate`).
   - experiment tools (when a compute node is configured): propose an experiment,
@@ -47,8 +55,9 @@ SYNC vs BACKGROUND delegation:
 
 When you delegate, give the subagent a COMPLETE, self-contained instruction — it
 cannot see this conversation. For multi-part requests, delegate the parts and
-combine the results. Methodology authoring (prose) and paper writing are on the
-roadmap; if asked, say what you can do now and offer to reason through it.
+combine the results. A natural pipeline is: research_literature →
+brainstorm_research_ideas → design_methodology → (experiments) → draft_paper;
+feed each stage's output forward as the `material` for the next.
 
 HOW TO WORK:
   - Be rigorous and concrete. Prefer primary sources; cite papers with titles

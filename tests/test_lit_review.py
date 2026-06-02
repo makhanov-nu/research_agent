@@ -28,7 +28,7 @@ Covered 2 papers.
 
 def test_slugify():
     assert slugify("Speculative Decoding for LLMs!") == "speculative-decoding-for-llms"
-    assert slugify("") == "review"
+    assert slugify("") == "draft"  # shared fallback across all LaTeX writers
 
 
 def test_extract_code_block():
