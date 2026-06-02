@@ -36,19 +36,19 @@ class _FakeTaskStore:
         return self.rows.get(tid)
 
 
-def _dispatcher(runners, notifications):
-    async def notify(channel_id, message):
-        notifications.append((channel_id, message))
+def _dispatcher(runners, events):
+    async def on_complete(task_id, agent, status, payload, channel_id):
+        events.append((task_id, agent, status, payload, channel_id))
 
-    return TaskDispatcher(runners, _FakeTaskStore(), notify, max_parallel=2)
+    return TaskDispatcher(runners, _FakeTaskStore(), on_complete, max_parallel=2)
 
 
-async def test_dispatch_runs_in_background_and_notifies():
+async def test_dispatch_runs_in_background_and_pushes_event():
     async def good_runner(task):
         return f"done: {task}", [{"type": "ai", "content": task}]
 
-    notes = []
-    disp = _dispatcher({"lit": good_runner}, notes)
+    events = []
+    disp = _dispatcher({"lit": good_runner}, events)
     tid = await disp.dispatch("lit", "find X", channel_id="c1")
     assert disp.task_store.rows[tid]["status"] in {"pending", "running"}  # not blocking
     await disp.join()
@@ -56,20 +56,21 @@ async def test_dispatch_runs_in_background_and_notifies():
     assert row["status"] == "done"
     assert row["result"] == "done: find X"
     assert row["trace"] == [{"type": "ai", "content": "find X"}]
-    assert notes and notes[0][0] == "c1" and "finished" in notes[0][1]
+    # completion is pushed (task_id, agent, status, payload, channel)
+    assert events == [(tid, "lit", "done", "done: find X", "c1")]
 
 
-async def test_dispatch_failure_is_recorded_and_notified():
+async def test_dispatch_failure_is_recorded_and_pushed():
     async def bad_runner(task):
         raise RuntimeError("boom")
 
-    notes = []
-    disp = _dispatcher({"lit": bad_runner}, notes)
+    events = []
+    disp = _dispatcher({"lit": bad_runner}, events)
     tid = await disp.dispatch("lit", "x", channel_id="c1")
     await disp.join()
     assert disp.task_store.rows[tid]["status"] == "failed"
     assert "boom" in disp.task_store.rows[tid]["error"]
-    assert notes and "failed" in notes[0][1]
+    assert events and events[0][2] == "failed" and "boom" in events[0][3]
 
 
 async def test_dispatch_unknown_agent_raises():
@@ -90,26 +91,26 @@ async def test_concurrency_capped_by_semaphore():
         active -= 1
         return "ok", []
 
-    notes = []
-    disp = _dispatcher({"s": slow_runner}, notes)  # max_parallel=2
+    events = []
+    disp = _dispatcher({"s": slow_runner}, events)  # max_parallel=2
     for _ in range(5):
         await disp.dispatch("s", "t", channel_id="c")
     await disp.join()
     assert peak <= 2
 
 
-async def test_get_task_result_tool_reports_status_and_result():
+async def test_dispatch_tool_is_the_only_tool_and_submits():
     async def good_runner(task):
         return "the answer", []
 
-    notes = []
-    disp = _dispatcher({"lit": good_runner}, notes)
-    dispatch_tool, get_result_tool = build_dispatch_tools(disp)
+    events = []
+    disp = _dispatcher({"lit": good_runner}, events)
+    tools = build_dispatch_tools(disp)
+    assert [t.name for t in tools] == ["dispatch_task"]  # no polling tool
 
-    msg = await dispatch_tool.ainvoke(
+    msg = await tools[0].ainvoke(
         {"agent": "lit", "task": "q", "config": {"configurable": {"thread_id": "c1"}}}
     )
-    assert "Dispatched task #1" in msg
+    assert "Dispatched task #1" in msg and "automatically" in msg
     await disp.join()
-    out = await get_result_tool.ainvoke({"task_id": 1})
-    assert out == "the answer"
+    assert events and events[0][2] == "done"

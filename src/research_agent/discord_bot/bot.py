@@ -195,7 +195,7 @@ class ResearchBot(discord.Client):
                 consortium=self.consortium,
             )
             self.dispatcher = TaskDispatcher(
-                runners, self.tasks, self._notify_channel,
+                runners, self.tasks, self._on_task_complete,
                 settings.max_parallel_tasks,
             )
 
@@ -262,6 +262,39 @@ class ResearchBot(discord.Client):
 
     async def _report_state_change(self, change) -> None:
         await self._notify_channel(change.channel_id, change.message)
+
+    async def _on_task_complete(self, task_id, agent, status, payload, channel_id) -> None:
+        """Push a finished background task back into the orchestrator's loop.
+
+        Instead of the orchestrator polling, a completion wakes it: we run a
+        graph turn on the task's thread with the result injected as an automated
+        event, then post the orchestrator's response to the channel.
+        """
+        if self.graph is None or not channel_id:
+            return
+        event = (
+            f"[BACKGROUND TASK COMPLETE] #{task_id} ({agent}) — {status}.\n\n"
+            f"{payload}\n\n"
+            "This is an automated event (not from the researcher). Incorporate "
+            "this result with the ongoing work, reply with what matters, and "
+            "dispatch any useful follow-ups. If nothing needs saying, reply 'OK'."
+        )
+        thread_id = str(channel_id)
+        config = {"configurable": {"thread_id": thread_id}}
+        try:
+            async with self._channel_locks.get(thread_id):
+                result = await self.graph.ainvoke(
+                    {"messages": [("user", event)]}, config=config
+                )
+            reply = _flatten(result["messages"][-1].content).strip()
+        except Exception:  # noqa: BLE001
+            logger.exception("Orchestrator failed handling completion of #%s", task_id)
+            await self._notify_channel(
+                channel_id, f"Task #{task_id} ({agent}) {status}, but I hit an error processing it."
+            )
+            return
+        if reply and reply.upper() != "OK":
+            await self._notify_channel(channel_id, reply)
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author == self.user or message.author.bot:

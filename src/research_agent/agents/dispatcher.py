@@ -19,8 +19,9 @@ logger = logging.getLogger(__name__)
 
 # A runner maps a task string -> (result, trace).
 Runner = Callable[[str], Awaitable[tuple[str, list]]]
-# A notifier posts a message to a channel.
-Notifier = Callable[[str | None, str], Awaitable[None]]
+# Called when a task reaches a terminal state, to push the event somewhere
+# (e.g. wake the orchestrator): (task_id, agent, status, result_or_error, channel_id).
+OnComplete = Callable[[int, str, str, str, "str | None"], Awaitable[None]]
 
 
 def build_runners(*, model, mcp_tools, reviewer, consortium) -> dict[str, Runner]:
@@ -50,11 +51,11 @@ def build_runners(*, model, mcp_tools, reviewer, consortium) -> dict[str, Runner
 
 
 class TaskDispatcher:
-    def __init__(self, runners: dict[str, Runner], task_store, notify: Notifier,
+    def __init__(self, runners: dict[str, Runner], task_store, on_complete: OnComplete,
                  max_parallel: int = 4):
         self._runners = runners
         self.task_store = task_store
-        self._notify = notify
+        self._on_complete = on_complete
         self._sem = asyncio.Semaphore(max_parallel)
         self._running: dict[int, asyncio.Task] = {}
 
@@ -81,20 +82,19 @@ class TaskDispatcher:
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Dispatched task %s (%s) failed", task_id, agent)
                 await self.task_store.fail(task_id, str(exc), [])
-                await self._safe_notify(channel_id, f"⚠️ Task #{task_id} ({agent}) failed: {exc}")
+                await self._fire(task_id, agent, "failed", str(exc), channel_id)
                 return
             finally:
                 self._running.pop(task_id, None)
             await self.task_store.finish(task_id, result, trace)
-            await self._safe_notify(
-                channel_id, f"✅ Task #{task_id} ({agent}) finished:\n{result}"
-            )
+            await self._fire(task_id, agent, "done", result, channel_id)
 
-    async def _safe_notify(self, channel_id, message) -> None:
+    async def _fire(self, task_id, agent, status, payload, channel_id) -> None:
+        """Push the terminal event to the orchestrator (never raises)."""
         try:
-            await self._notify(channel_id, message)
+            await self._on_complete(task_id, agent, status, payload, channel_id)
         except Exception:  # noqa: BLE001
-            logger.exception("Task completion notification failed")
+            logger.exception("Task completion handler failed for #%s", task_id)
 
     async def join(self) -> None:
         """Await all in-flight tasks (used in tests / graceful shutdown)."""
@@ -120,9 +120,11 @@ def build_dispatch_tools(dispatcher: TaskDispatcher) -> list[BaseTool]:
             "Run a subagent in the BACKGROUND so you can keep talking instead of "
             f"waiting. `agent` must be one of: {agents}. `task` is a COMPLETE, "
             "self-contained instruction (for consortium/literature_review, the "
-            "topic). Returns a task id immediately; the result is posted to this "
-            "channel when ready, and you can collect it with get_task_result(id). "
-            "Use this for heavy or multiple parallel jobs; for a quick single "
+            "topic). Returns a task id immediately and runs asynchronously. You do "
+            "NOT poll for the result: when the task finishes, its result is "
+            "delivered back to you automatically as a '[BACKGROUND TASK COMPLETE]' "
+            "event for you to process. Use this for heavy or multiple parallel "
+            "jobs (dispatch several to run them at once); for a quick single "
             "lookup, call the direct tool instead."
         ),
     )
@@ -133,18 +135,7 @@ def build_dispatch_tools(dispatcher: TaskDispatcher) -> list[BaseTool]:
             return str(exc)
         return (
             f"Dispatched task #{task_id} to `{agent}` in the background. "
-            f"I'll report here when it finishes; collect it with "
-            f"get_task_result({task_id})."
+            f"Its result will be delivered to you automatically when it finishes."
         )
 
-    @tool("get_task_result")
-    async def get_task_result(task_id: int) -> str:
-        """Get the status and (if finished) the result of a dispatched task."""
-        t = await dispatcher.task_store.get(task_id)
-        if not t:
-            return f"No task #{task_id}."
-        if t["status"] != "done":
-            return f"Task #{task_id} ({t['agent']}) is {t['status']}."
-        return t["result"] or "(no result recorded)"
-
-    return [dispatch_task, get_task_result]
+    return [dispatch_task]
