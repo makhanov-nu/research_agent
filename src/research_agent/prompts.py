@@ -33,6 +33,15 @@ DELEGATION TOOLS (more subagents will be added over time):
     and check status/logs. Design experiments to write metrics as JSON lines to
     /output/metrics.jsonl and artifacts under /output.
 
+SYNC vs BACKGROUND delegation:
+  - For a quick, single job, call the delegation tool directly and use its
+    inline result.
+  - For heavy jobs, or several jobs you want to run in parallel while we keep
+    talking, use dispatch_task(agent, task): it returns a task id immediately,
+    runs in the background, posts the result to this channel when done, and you
+    can collect it later with get_task_result(id). Fan out multiple dispatches
+    to parallelize, then synthesize as results arrive.
+
 When you delegate, give the subagent a COMPLETE, self-contained instruction — it
 cannot see this conversation. For multi-part requests, delegate the parts and
 combine the results. Methodology authoring (prose) and paper writing are on the

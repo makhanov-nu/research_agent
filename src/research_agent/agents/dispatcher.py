@@ -1,0 +1,150 @@
+"""Background task dispatcher: run subagents off the conversation turn.
+
+The orchestrator submits jobs via the dispatch tools; each runs as a background
+asyncio task (bounded by a concurrency limit), records its result + trace to the
+task store, and posts the result to the originating channel when done. This lets
+the orchestrator fan out parallel work and keep chatting while it runs.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Awaitable, Callable
+
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool, tool
+
+logger = logging.getLogger(__name__)
+
+# A runner maps a task string -> (result, trace).
+Runner = Callable[[str], Awaitable[tuple[str, list]]]
+# A notifier posts a message to a channel.
+Notifier = Callable[[str | None, str], Awaitable[None]]
+
+
+def build_runners(*, model, mcp_tools, reviewer, consortium) -> dict[str, Runner]:
+    """Assemble the dispatchable subagent runners from available resources."""
+    from .literature import build_literature_runner
+
+    runners: dict[str, Runner] = {}
+
+    if mcp_tools:
+        runners["research_literature"] = build_literature_runner(model, mcp_tools)
+
+    async def _review(task: str) -> tuple[str, list]:
+        r = await reviewer.draft(task)
+        summary = f"Wrote a LaTeX literature review with {r['n_refs']} references: {r['tex_path']}"
+        return summary, [{"type": "artifact", "tex": r["tex_path"], "bib": r["bib_path"]}]
+
+    runners["literature_review"] = _review
+
+    if consortium is not None:
+        async def _consortium(task: str) -> tuple[str, list]:
+            r = await consortium.ideate(task)
+            return r["ideas"], [{"type": "transcript", "path": r["rel_path"]}]
+
+        runners["consortium"] = _consortium
+
+    return runners
+
+
+class TaskDispatcher:
+    def __init__(self, runners: dict[str, Runner], task_store, notify: Notifier,
+                 max_parallel: int = 4):
+        self._runners = runners
+        self.task_store = task_store
+        self._notify = notify
+        self._sem = asyncio.Semaphore(max_parallel)
+        self._running: dict[int, asyncio.Task] = {}
+
+    @property
+    def agents(self) -> list[str]:
+        return list(self._runners)
+
+    async def dispatch(self, agent: str, task: str, channel_id: str | None) -> int:
+        if agent not in self._runners:
+            raise ValueError(
+                f"Unknown agent {agent!r}. Available: {', '.join(self.agents)}."
+            )
+        task_id = await self.task_store.create(agent, task, channel_id)
+        bg = asyncio.create_task(self._run(task_id, agent, task, channel_id))
+        if task_id is not None:
+            self._running[task_id] = bg
+        return task_id
+
+    async def _run(self, task_id, agent, task, channel_id) -> None:
+        async with self._sem:
+            await self.task_store.mark_running(task_id)
+            try:
+                result, trace = await self._runners[agent](task)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Dispatched task %s (%s) failed", task_id, agent)
+                await self.task_store.fail(task_id, str(exc), [])
+                await self._safe_notify(channel_id, f"⚠️ Task #{task_id} ({agent}) failed: {exc}")
+                return
+            finally:
+                self._running.pop(task_id, None)
+            await self.task_store.finish(task_id, result, trace)
+            await self._safe_notify(
+                channel_id, f"✅ Task #{task_id} ({agent}) finished:\n{result}"
+            )
+
+    async def _safe_notify(self, channel_id, message) -> None:
+        try:
+            await self._notify(channel_id, message)
+        except Exception:  # noqa: BLE001
+            logger.exception("Task completion notification failed")
+
+    async def join(self) -> None:
+        """Await all in-flight tasks (used in tests / graceful shutdown)."""
+        if self._running:
+            await asyncio.gather(*self._running.values(), return_exceptions=True)
+
+    async def shutdown(self) -> None:
+        for t in list(self._running.values()):
+            t.cancel()
+
+
+def build_dispatch_tools(dispatcher: TaskDispatcher) -> list[BaseTool]:
+    agents = ", ".join(dispatcher.agents) or "(none)"
+
+    def _channel(config: RunnableConfig | None) -> str | None:
+        if not config:
+            return None
+        return (config.get("configurable") or {}).get("thread_id")
+
+    @tool(
+        "dispatch_task",
+        description=(
+            "Run a subagent in the BACKGROUND so you can keep talking instead of "
+            f"waiting. `agent` must be one of: {agents}. `task` is a COMPLETE, "
+            "self-contained instruction (for consortium/literature_review, the "
+            "topic). Returns a task id immediately; the result is posted to this "
+            "channel when ready, and you can collect it with get_task_result(id). "
+            "Use this for heavy or multiple parallel jobs; for a quick single "
+            "lookup, call the direct tool instead."
+        ),
+    )
+    async def dispatch_task(agent: str, task: str, config: RunnableConfig = None) -> str:
+        try:
+            task_id = await dispatcher.dispatch(agent, task, _channel(config))
+        except ValueError as exc:
+            return str(exc)
+        return (
+            f"Dispatched task #{task_id} to `{agent}` in the background. "
+            f"I'll report here when it finishes; collect it with "
+            f"get_task_result({task_id})."
+        )
+
+    @tool("get_task_result")
+    async def get_task_result(task_id: int) -> str:
+        """Get the status and (if finished) the result of a dispatched task."""
+        t = await dispatcher.task_store.get(task_id)
+        if not t:
+            return f"No task #{task_id}."
+        if t["status"] != "done":
+            return f"Task #{task_id} ({t['agent']}) is {t['status']}."
+        return t["result"] or "(no result recorded)"
+
+    return [dispatch_task, get_task_result]

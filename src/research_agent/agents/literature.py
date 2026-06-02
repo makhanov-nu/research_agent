@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from langchain_core.tools import BaseTool
 
-from .subagent import build_subagent_tool
+from .subagent import build_subagent_tool, run_subagent
 
 _SYSTEM = """You are a literature research subagent. You receive one self-contained \
 research question or task. Use the literature tools to search for and read the \
@@ -31,3 +31,14 @@ def build_literature_agent_tool(model, lit_tools, task_store=None) -> BaseTool:
         model=model,
         task_store=task_store,
     )
+
+
+def build_literature_runner(model, lit_tools):
+    """A bare runner (task -> (result, trace)) for the background dispatcher."""
+
+    async def _run(task: str) -> tuple[str, list]:
+        return await run_subagent(
+            system_prompt=_SYSTEM, tools=lit_tools, model=model, task=task
+        )
+
+    return _run

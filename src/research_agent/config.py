@@ -106,6 +106,8 @@ class Settings(BaseSettings):
     experiment_require_approval: bool = True
     # How often (seconds) the job poller checks active runs.
     job_poll_interval_seconds: int = 60
+    # Max subagent tasks the background dispatcher runs concurrently.
+    max_parallel_tasks: int = 4
 
     # Name the agent answers to / signs off as.
     agent_name: str = "Beaker"

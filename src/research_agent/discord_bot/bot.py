@@ -127,6 +127,7 @@ class ResearchBot(discord.Client):
         self.experiments = None
         self.consortium = None
         self.tasks = None
+        self.dispatcher = None
         self.llm = None
         self._pool = None
         self._maintenance_task: asyncio.Task | None = None
@@ -182,9 +183,27 @@ class ResearchBot(discord.Client):
                 settings.consortium_rounds,
             )
 
+        # Background dispatcher for async/parallel subagent runs (needs the
+        # task store to track them).
+        if self.tasks is not None:
+            from ..agents.dispatcher import TaskDispatcher, build_runners
+            from ..llm import get_llm
+            from ..writing.lit_review import LiteratureReviewer
+
+            reviewer = LiteratureReviewer(get_llm(), mcp_tools, settings.output_dir)
+            runners = build_runners(
+                model=get_llm(), mcp_tools=mcp_tools, reviewer=reviewer,
+                consortium=self.consortium,
+            )
+            self.dispatcher = TaskDispatcher(
+                runners, self.tasks, self._notify_channel,
+                settings.max_parallel_tasks,
+            )
+
         self.graph = await build_graph(
             checkpointer, self.memory, self.experiments,
             mcp_tools=mcp_tools, consortium=self.consortium, task_store=self.tasks,
+            dispatcher=self.dispatcher,
         )
         logger.info(
             "Research agent ready (memory=%s, experiments=%s, consortium=%s).",
@@ -195,9 +214,25 @@ class ResearchBot(discord.Client):
         for task in (self._maintenance_task, self._poller_task):
             if task:
                 task.cancel()
+        if self.dispatcher is not None:
+            await self.dispatcher.shutdown()
         if self._pool is not None:
             await self._pool.close()
         await super().close()
+
+    async def _notify_channel(self, channel_id: str | None, message: str) -> None:
+        """Post a message to a channel by id (used for background notifications)."""
+        if not channel_id:
+            return
+        channel = self.get_channel(int(channel_id))
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(int(channel_id))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                logger.warning("Cannot reach channel %s to notify", channel_id)
+                return
+        for chunk in _chunk(message):
+            await channel.send(chunk)
 
     async def on_ready(self) -> None:
         logger.info("Logged in as %s (id=%s)", self.user, self.user.id)
@@ -227,17 +262,7 @@ class ResearchBot(discord.Client):
             await asyncio.sleep(settings.job_poll_interval_seconds)
 
     async def _report_state_change(self, change) -> None:
-        if not change.channel_id:
-            return
-        channel = self.get_channel(int(change.channel_id))
-        if channel is None:
-            try:
-                channel = await self.fetch_channel(int(change.channel_id))
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                logger.warning("Cannot reach channel %s to report", change.channel_id)
-                return
-        for chunk in _chunk(change.message):
-            await channel.send(chunk)
+        await self._notify_channel(change.channel_id, change.message)
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author == self.user or message.author.bot:

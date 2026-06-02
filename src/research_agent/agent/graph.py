@@ -41,6 +41,7 @@ def _latest_text(messages: list, message_type) -> str:
 async def build_graph(
     checkpointer: BaseCheckpointSaver | None = None, memory=None,
     experiment_runner=None, mcp_tools=None, consortium=None, task_store=None,
+    dispatcher=None,
 ):
     """Build and compile the orchestrator agent graph.
 
@@ -69,6 +70,11 @@ async def build_graph(
         experiment_runner=experiment_runner, consortium=consortium,
         task_store=task_store,
     )
+    if dispatcher is not None:
+        from ..agents.dispatcher import build_dispatch_tools
+
+        tools += build_dispatch_tools(dispatcher)
+
     llm_with_tools = llm.bind_tools(tools) if tools else llm
 
     async def load_context(state: AgentState) -> dict:
