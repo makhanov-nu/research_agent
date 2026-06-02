@@ -37,8 +37,10 @@ class _FakeTaskStore:
 
 
 def _dispatcher(runners, events):
-    async def on_complete(task_id, agent, status, payload, channel_id):
-        events.append((task_id, agent, status, payload, channel_id))
+    # The completion trigger carries no result — only the task id/agent/status/
+    # channel. The result lives in the task store, read back by the handler.
+    async def on_complete(task_id, agent, status, channel_id):
+        events.append((task_id, agent, status, channel_id))
 
     return TaskDispatcher(runners, _FakeTaskStore(), on_complete, max_parallel=2)
 
@@ -54,10 +56,11 @@ async def test_dispatch_runs_in_background_and_pushes_event():
     await disp.join()
     row = disp.task_store.rows[tid]
     assert row["status"] == "done"
+    # The result + trace are written to the dashboard (the single source of truth)...
     assert row["result"] == "done: find X"
     assert row["trace"] == [{"type": "ai", "content": "find X"}]
-    # completion is pushed (task_id, agent, status, payload, channel)
-    assert events == [(tid, "lit", "done", "done: find X", "c1")]
+    # ...while the completion event is a pure trigger (no result payload).
+    assert events == [(tid, "lit", "done", "c1")]
 
 
 async def test_dispatch_failure_is_recorded_and_pushed():
@@ -69,8 +72,9 @@ async def test_dispatch_failure_is_recorded_and_pushed():
     tid = await disp.dispatch("lit", "x", channel_id="c1")
     await disp.join()
     assert disp.task_store.rows[tid]["status"] == "failed"
+    # The error is recorded in the dashboard; the trigger just signals "failed".
     assert "boom" in disp.task_store.rows[tid]["error"]
-    assert events and events[0][2] == "failed" and "boom" in events[0][3]
+    assert events and events[0][2] == "failed"
 
 
 async def test_dispatch_unknown_agent_raises():

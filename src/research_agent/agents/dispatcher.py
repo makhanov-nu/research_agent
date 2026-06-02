@@ -19,9 +19,11 @@ logger = logging.getLogger(__name__)
 
 # A runner maps a task string -> (result, trace).
 Runner = Callable[[str], Awaitable[tuple[str, list]]]
-# Called when a task reaches a terminal state, to push the event somewhere
-# (e.g. wake the orchestrator): (task_id, agent, status, result_or_error, channel_id).
-OnComplete = Callable[[int, str, str, str, "str | None"], Awaitable[None]]
+# Fired when a task reaches a terminal state. This is a pure TRIGGER: it carries
+# only the task id, agent, status, and channel — NOT the result. The result and
+# error already live in the task dashboard; the handler reads them back from
+# there (single source of truth): (task_id, agent, status, channel_id).
+OnComplete = Callable[[int, str, str, "str | None"], Awaitable[None]]
 
 
 def build_runners(*, model, mcp_tools, writers, consortium) -> dict[str, Runner]:
@@ -88,18 +90,21 @@ class TaskDispatcher:
                 result, trace = await self._runners[agent](task)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Dispatched task %s (%s) failed", task_id, agent)
+                # Record the failure to the dashboard, THEN trigger the handler.
                 await self.task_store.fail(task_id, str(exc), [])
-                await self._fire(task_id, agent, "failed", str(exc), channel_id)
+                await self._fire(task_id, agent, "failed", channel_id)
                 return
             finally:
                 self._running.pop(task_id, None)
+            # Write the result to the dashboard FIRST so the handler can read it.
             await self.task_store.finish(task_id, result, trace)
-            await self._fire(task_id, agent, "done", result, channel_id)
+            await self._fire(task_id, agent, "done", channel_id)
 
-    async def _fire(self, task_id, agent, status, payload, channel_id) -> None:
-        """Push the terminal event to the orchestrator (never raises)."""
+    async def _fire(self, task_id, agent, status, channel_id) -> None:
+        """Trigger the completion handler (never raises). Carries no result —
+        the handler reads the result/error back from the task store."""
         try:
-            await self._on_complete(task_id, agent, status, payload, channel_id)
+            await self._on_complete(task_id, agent, status, channel_id)
         except Exception:  # noqa: BLE001
             logger.exception("Task completion handler failed for #%s", task_id)
 

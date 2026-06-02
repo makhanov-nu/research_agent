@@ -84,19 +84,20 @@ flowchart TB
     end
 
     you -- DM / @-mention --> bot
-    bot -- "delegate (sync or background)" --> subs
-    subs -- "final result only" --> bot
-    bot -- responses / push events --> you
-    bot <-- "create & inspect<br/>(!tasks · !task · !trace)" --> dash
-    subs -. "write result + reasoning + tool calls" .-> dash
-    dash -. "push: [BACKGROUND TASK COMPLETE]" .-> bot
+    bot -- responses --> you
+    bot -- "1.delegate (create task)" --> subs
+    subs -- "2.write result + full trace" --> dash
+    dash -- "3.trigger: result ready" --> bot
+    bot -- "4.read result · inspect (!tasks · !task · !trace)" --> dash
     lit -. external papers .-> paperclip[(paperclip MCP)]
 ```
 
-> **How to read it:** the orchestrator delegates self-contained jobs to subagents
-> and gets back only their final result (the full reasoning/tool-call trace goes
-> to the dashboard, not the orchestrator's context). Heavy jobs run in the
-> background and **push** their result back when done.
+> **How to read it:** the **task dashboard is the single source of truth** for
+> results. A subagent never hands its answer straight back to the orchestrator —
+> it (1) is created as a task, (2) writes its result *and* full reasoning/tool-call
+> trace to the dashboard, which (3) triggers the orchestrator ("result ready"), so
+> it (4) reads the result back from the dashboard. The orchestrator's context only
+> ever sees the result — the trace stays in the dashboard (pull it with `!trace`).
 
 - **Subagents** return only their final answer; the full trace lands in the task
   `trace` column via `TaskRecorderMiddleware`.

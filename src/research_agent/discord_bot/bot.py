@@ -263,15 +263,23 @@ class ResearchBot(discord.Client):
     async def _report_state_change(self, change) -> None:
         await self._notify_channel(change.channel_id, change.message)
 
-    async def _on_task_complete(self, task_id, agent, status, payload, channel_id) -> None:
-        """Push a finished background task back into the orchestrator's loop.
+    async def _on_task_complete(self, task_id, agent, status, channel_id) -> None:
+        """Trigger: a finished background task wakes the orchestrator.
 
-        Instead of the orchestrator polling, a completion wakes it: we run a
-        graph turn on the task's thread with the result injected as an automated
-        event, then post the orchestrator's response to the channel.
+        The event itself carries no result — the dashboard is the single source
+        of truth, so we READ the result (or error) back from the task store,
+        inject it as an automated event on the task's thread, run a graph turn,
+        and post the orchestrator's response to the channel.
         """
         if self.graph is None or not channel_id:
             return
+        row = await self.tasks.get(task_id) if self.tasks is not None else None
+        if row is None:
+            payload = "(result unavailable — not found in the task dashboard)"
+        elif status == "failed":
+            payload = f"The task failed: {row.get('error') or 'unknown error'}"
+        else:
+            payload = row.get("result") or "(the task recorded no result)"
         event = (
             f"[BACKGROUND TASK COMPLETE] #{task_id} ({agent}) — {status}.\n\n"
             f"{payload}\n\n"
