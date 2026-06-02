@@ -72,6 +72,8 @@ flowchart TB
         bot <--> mem
     end
 
+    dash[(📋 Task dashboard<br/>Postgres: status · result · full trace)]
+
     subgraph subs [Specialized subagents · create_agent + middleware]
         lit[📚 Literature<br/>owns paperclip MCP]
         review[📝 Lit-review writer]
@@ -81,13 +83,13 @@ flowchart TB
         exp[🧪 Experiment runner<br/>SSH + Docker · GPU node]
     end
 
-    dash[(📋 Task dashboard<br/>Postgres: result + full trace)]
-
     you -- DM / @-mention --> bot
     bot -- "delegate (sync or background)" --> subs
     subs -- "final result only" --> bot
     bot -- responses / push events --> you
-    subs -. "result + reasoning + tool calls" .-> dash
+    bot <-- "create & inspect<br/>(!tasks · !task · !trace)" --> dash
+    subs -. "write result + reasoning + tool calls" .-> dash
+    dash -. "push: [BACKGROUND TASK COMPLETE]" .-> bot
     lit -. external papers .-> paperclip[(paperclip MCP)]
 ```
 
