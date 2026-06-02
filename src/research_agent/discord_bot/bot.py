@@ -172,7 +172,8 @@ class ResearchBot(discord.Client):
             )
 
         self.graph = await build_graph(
-            checkpointer, self.memory, self.experiments, mcp_tools=mcp_tools
+            checkpointer, self.memory, self.experiments,
+            mcp_tools=mcp_tools, consortium=self.consortium,
         )
         logger.info(
             "Research agent ready (memory=%s, experiments=%s, consortium=%s).",

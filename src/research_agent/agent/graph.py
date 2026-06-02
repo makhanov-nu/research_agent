@@ -40,35 +40,34 @@ def _latest_text(messages: list, message_type) -> str:
 
 async def build_graph(
     checkpointer: BaseCheckpointSaver | None = None, memory=None,
-    experiment_runner=None, mcp_tools=None,
+    experiment_runner=None, mcp_tools=None, consortium=None,
 ):
-    """Build and compile the research agent graph.
+    """Build and compile the orchestrator agent graph.
+
+    The orchestrator's tools delegate to specialized subagents (literature,
+    review writing, ideation consortium, experiments). It does NOT get raw
+    literature tools directly — those live inside the literature subagent — so
+    intermediate search output never enters the orchestrator's context.
 
     Args:
         checkpointer: persistence backend for conversation state.
         memory: a MemoryManager, or None to run without long-term memory.
-        experiment_runner: an ExperimentRunner whose tools are exposed to the
-            model, or None to run without experiment tooling.
-        mcp_tools: preloaded MCP tools to reuse (avoids a second connection);
-            loaded here when not provided.
+        experiment_runner: an ExperimentRunner, or None.
+        mcp_tools: preloaded MCP tools to reuse; loaded here when not provided.
+        consortium: a Consortium, or None.
     """
     if mcp_tools is None:
         mcp_tools = await load_mcp_tools()
-    tools = list(mcp_tools)
 
-    # Writing tools: the lit-review subagent reuses the literature (MCP) tools.
+    from ..agents import build_delegated_tools
     from ..writing.lit_review import LiteratureReviewer
-    from ..writing.tools import build_writing_tools
-
-    reviewer = LiteratureReviewer(get_llm(), mcp_tools, settings.output_dir)
-    tools += build_writing_tools(reviewer)
-
-    if experiment_runner is not None and experiment_runner.enabled:
-        from ..experiments.tools import build_experiment_tools
-
-        tools += build_experiment_tools(experiment_runner)
 
     llm = get_llm()
+    reviewer = LiteratureReviewer(get_llm(), mcp_tools, settings.output_dir)
+    tools = build_delegated_tools(
+        llm=get_llm(), mcp_tools=mcp_tools, reviewer=reviewer,
+        experiment_runner=experiment_runner, consortium=consortium,
+    )
     llm_with_tools = llm.bind_tools(tools) if tools else llm
 
     async def load_context(state: AgentState) -> dict:
