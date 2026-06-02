@@ -40,6 +40,9 @@ HELP_TEXT = (
     "`!cancel <id>` — cancel a running experiment\n"
     "`!getfile <path>` — fetch a written output (e.g. a drafted LaTeX review)\n"
     "`!ideate <topic>` — convene the multi-model consortium to propose 3 Q1 ideas\n"
+    "`!tasks` — recent subagent tasks (the dashboard)\n"
+    "`!task <id>` — a task's status + result\n"
+    "`!trace <id>` — export a task's full trace (reasoning + tool calls) as a file\n"
     "`!help` — this message\n\n"
     "Otherwise, just talk to me — DM or @-mention."
 )
@@ -123,6 +126,7 @@ class ResearchBot(discord.Client):
         self.memory: MemoryManager | None = None
         self.experiments = None
         self.consortium = None
+        self.tasks = None
         self.llm = None
         self._pool = None
         self._maintenance_task: asyncio.Task | None = None
@@ -157,6 +161,13 @@ class ResearchBot(discord.Client):
             )
             self._poller_task = self.loop.create_task(self._run_job_poller())
 
+        # Task dashboard (cross-subagent registry); needs the DB pool.
+        if self._pool is not None:
+            from ..agents.task_store import TaskStore
+
+            self.tasks = TaskStore(self._pool)
+            await self.tasks.setup()
+
         # Load MCP tools once and share them with the graph and the consortium.
         from ..mcp_client import load_mcp_tools
 
@@ -173,7 +184,7 @@ class ResearchBot(discord.Client):
 
         self.graph = await build_graph(
             checkpointer, self.memory, self.experiments,
-            mcp_tools=mcp_tools, consortium=self.consortium,
+            mcp_tools=mcp_tools, consortium=self.consortium, task_store=self.tasks,
         )
         logger.info(
             "Research agent ready (memory=%s, experiments=%s, consortium=%s).",
@@ -311,8 +322,58 @@ class ResearchBot(discord.Client):
             await self._send_file(message, arg.strip())
         elif cmd == "ideate":
             await self._ideate(message, arg.strip())
+        elif cmd in {"tasks", "task", "trace"}:
+            await self._handle_task_command(message, cmd, arg.strip())
         else:
             await message.channel.send(f"Unknown command `!{cmd}`.\n\n{HELP_TEXT}")
+
+    async def _handle_task_command(self, message, cmd, arg) -> None:
+        if self.tasks is None:
+            await message.channel.send("The task dashboard isn't configured (needs the DB).")
+            return
+
+        if cmd == "tasks":
+            rows = await self.tasks.list_recent(limit=15)
+            if not rows:
+                await message.channel.send("No tasks yet.")
+                return
+            lines = [
+                f"#{r['id']} [{r['status']}] {r['agent']} — {r['input'][:60]}"
+                for r in rows
+            ]
+            await message.channel.send("**Tasks (recent)**\n" + "\n".join(lines))
+            return
+
+        if not arg.isdigit():
+            await message.channel.send(f"Usage: `!{cmd} <task_id>`")
+            return
+        task = await self.tasks.get(int(arg))
+        if task is None:
+            await message.channel.send(f"No task #{arg}.")
+            return
+
+        if cmd == "task":
+            body = (
+                f"**Task #{task['id']}** — {task['agent']} [{task['status']}]\n"
+                f"Input: {task['input'][:300]}\n\n"
+                f"{(task.get('result') or task.get('error') or '(no result yet)')}"
+            )
+            for chunk in _chunk(body):
+                await message.channel.send(chunk)
+            return
+
+        # cmd == "trace": export the full trace as a JSON file via outputs/
+        import json
+        from pathlib import Path
+
+        traces_dir = Path(settings.output_dir) / "traces"
+        traces_dir.mkdir(parents=True, exist_ok=True)
+        out = traces_dir / f"task_{task['id']}.json"
+        out.write_text(json.dumps(task.get("trace") or [], indent=2, default=str))
+        await message.channel.send(
+            f"Exported trace for task #{task['id']} "
+            f"({len(task.get('trace') or [])} steps): `!getfile traces/{out.name}`"
+        )
 
     async def _ideate(self, message, topic) -> None:
         if self.consortium is None:

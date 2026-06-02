@@ -22,11 +22,12 @@ _DESCRIPTION = (
 )
 
 
-def build_literature_agent_tool(llm, lit_tools) -> BaseTool:
+def build_literature_agent_tool(model, lit_tools, task_store=None) -> BaseTool:
     return build_subagent_tool(
         name="research_literature",
         description=_DESCRIPTION,
         system_prompt=_SYSTEM,
         tools=lit_tools,
-        llm=llm,
+        model=model,
+        task_store=task_store,
     )

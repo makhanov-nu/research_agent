@@ -14,21 +14,22 @@ from .literature import build_literature_agent_tool
 
 
 def build_delegated_tools(
-    *, llm, mcp_tools, reviewer, experiment_runner=None, consortium=None
+    *, llm, mcp_tools, reviewer, experiment_runner=None, consortium=None,
+    task_store=None,
 ) -> list[BaseTool]:
     tools: list[BaseTool] = []
 
     # Literature research subagent (owns the paperclip/MCP tools so the
     # orchestrator never sees raw search output).
     if mcp_tools:
-        tools.append(build_literature_agent_tool(llm, mcp_tools))
+        tools.append(build_literature_agent_tool(llm, mcp_tools, task_store))
 
     # LaTeX literature-review writer (itself a subagent).
-    tools += build_writing_tools(reviewer)
+    tools += build_writing_tools(reviewer, task_store=task_store)
 
     # Multi-model ideation consortium.
     if consortium is not None:
-        tools.append(build_consortium_tool(consortium))
+        tools.append(build_consortium_tool(consortium, task_store=task_store))
 
     # Experiment tools (lightweight, return concise status strings).
     if experiment_runner is not None and getattr(experiment_runner, "enabled", False):
