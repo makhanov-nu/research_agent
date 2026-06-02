@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from ..config import settings
 from .episodic import EpisodicStore
 from .procedural import ProceduralMemory
 from .semantic import SemanticMemory
