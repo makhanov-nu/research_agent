@@ -10,6 +10,7 @@
 ![Discord](https://img.shields.io/badge/interface-Discord-5865F2)
 ![Python](https://img.shields.io/badge/python-3.12-3776AB)
 ![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-orange)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
 [Why](#-why) · [What it does](#-what-it-does) · [Architecture](#-architecture) · [Commands](#-commands) · [Memory](#-memory) · [Setup](#-setup) · [Docs](#-documentation)
 
