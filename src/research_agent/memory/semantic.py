@@ -18,6 +18,32 @@ from ..config import settings
 logger = logging.getLogger(__name__)
 
 
+def _embedder_block() -> dict:
+    """mem0 embedder config.
+
+    OpenRouter exposes an OpenAI-compatible embeddings endpoint, so when the
+    provider is OpenRouter we route embeddings there too (reusing the OpenRouter
+    key) and normalize the slug to ``openai/<model>``. text-embedding-3-small is
+    1536-dim either way, so the pgvector collection needs no migration.
+    """
+    provider = settings.llm_provider.lower()
+    model = settings.embedding_model
+    if provider == "openrouter":
+        return {
+            "provider": "openai",
+            "config": {
+                "model": model if "/" in model else f"openai/{model}",
+                "embedding_dims": settings.embedding_dims,
+                "api_key": settings.openrouter_api_key,
+                "openai_base_url": settings.openrouter_base_url,
+            },
+        }
+    return {
+        "provider": "openai",
+        "config": {"model": model, "embedding_dims": settings.embedding_dims},
+    }
+
+
 def _llm_block() -> dict:
     """mem0 LLM config mirroring the agent's provider.
 
@@ -60,22 +86,21 @@ def _build_config() -> dict:
             },
         },
         "llm": _llm_block(),
-        "embedder": {
-            "provider": "openai",
-            "config": {
-                "model": settings.embedding_model,
-                "embedding_dims": settings.embedding_dims,
-            },
-        },
+        "embedder": _embedder_block(),
     }
+
+
+def _has_embedder_credentials() -> bool:
+    """True when we have a key for the embeddings endpoint in use."""
+    if settings.llm_provider.lower() == "openrouter":
+        return bool(settings.openrouter_api_key)
+    return bool(settings.openai_api_key or _openai_key_in_env())
 
 
 class SemanticMemory:
     def __init__(self):
         self._mem = None
-        self._enabled = settings.memory_enabled and bool(
-            settings.openai_api_key or _openai_key_in_env()
-        )
+        self._enabled = settings.memory_enabled and _has_embedder_credentials()
 
     @property
     def enabled(self) -> bool:
@@ -85,7 +110,7 @@ class SemanticMemory:
         """Instantiate the mem0 client (synchronous; call off the event loop)."""
         if not self._enabled:
             logger.warning(
-                "Semantic memory disabled (need DATABASE_URL + OPENAI_API_KEY)."
+                "Semantic memory disabled (need DATABASE_URL + an embeddings key)."
             )
             return
         try:
@@ -121,7 +146,10 @@ class SemanticMemory:
         if not self.enabled:
             return ""
         try:
-            res = self._mem.search(query, user_id=settings.memory_user_id, limit=limit)
+            # mem0 2.x: scope by user via filters (top-level user_id is rejected).
+            res = self._mem.search(
+                query, filters={"user_id": settings.memory_user_id}, limit=limit
+            )
         except Exception:  # noqa: BLE001
             logger.exception("Semantic memory search failed.")
             return ""
