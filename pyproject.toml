@@ -40,7 +40,8 @@ web = [
     "httpx>=0.27",
 ]
 obs = [
-    "arize-phoenix>=4",
+    # Client-side tracing only; the Phoenix server/UI runs as a Docker container
+    # (see docker-compose.yml), so the heavy `arize-phoenix` package isn't needed.
     "arize-phoenix-otel>=0.5",
     "openinference-instrumentation-langchain>=0.1.29",
 ]
