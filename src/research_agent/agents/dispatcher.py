@@ -28,7 +28,8 @@ Runner = Callable[[str, "str | None"], Awaitable[tuple[str, list]]]
 OnComplete = Callable[[int, str, str, "str | None"], Awaitable[None]]
 
 
-def build_runners(*, model, mcp_tools, writers, consortium, projects=None) -> dict[str, Runner]:
+def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
+                  memory=None) -> dict[str, Runner]:
     """Assemble the dispatchable subagent runners from available resources.
 
     Runners are project-aware: each resolves the project from the originating
@@ -87,6 +88,7 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None) -> di
 
     if consortium is not None:
         async def _consortium(task: str, channel_id: str | None) -> tuple[str, list]:
+            from ..consortium import capture_council
             from ..projects import save_council_proposal
 
             r = await consortium.ideate(task)
@@ -96,6 +98,8 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None) -> di
                 council_rel = await save_council_proposal(projects, project, task, r["ideas"])
                 if council_rel:
                     extra = [{"type": "council", "path": council_rel}]
+            # Capture to memory so future ideation builds on this session.
+            await capture_council(memory, channel_id, task, r["ideas"], r["rel_path"])
             return r["ideas"], [{"type": "transcript", "path": r["rel_path"]}, *extra]
 
         runners["consortium"] = _consortium

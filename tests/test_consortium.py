@@ -74,6 +74,29 @@ async def test_session_feedback_enters_transcript_and_next_round(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_capture_council_records_experience_and_lesson():
+    from research_agent.consortium import capture_council
+
+    class _Mem:
+        def __init__(self):
+            self.exp = []
+            self.lessons = []
+
+        async def log_experience(self, kind, summary, channel_id=None, metadata=None):
+            self.exp.append((kind, channel_id))
+
+        async def record_lesson(self, text, *, kind, channel_id=None, **kw):
+            self.lessons.append((kind, text))
+
+    mem = _Mem()
+    await capture_council(mem, "chan-1", "specdec", "the validated idea", "ideas/x.md", rounds=2)
+    assert mem.exp and mem.exp[0][0] == "council_session"
+    assert mem.lessons and mem.lessons[0][0] == "council"
+    # no-op without a memory manager
+    await capture_council(None, "c", "t", "i")
+
+
+@pytest.mark.asyncio
 async def test_session_finalize_saves_document(tmp_path):
     c = _FakeConsortium(tmp_path)
     session = c.new_session("my topic")

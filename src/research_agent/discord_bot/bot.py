@@ -209,7 +209,7 @@ class ResearchBot(discord.Client):
             writers = build_writers(get_llm(), mcp_tools, settings.output_dir)
             runners = build_runners(
                 model=get_llm(), mcp_tools=mcp_tools, writers=writers,
-                consortium=self.consortium, projects=self.projects,
+                consortium=self.consortium, projects=self.projects, memory=self.memory,
             )
             self.dispatcher = TaskDispatcher(
                 runners, self.tasks, self._on_task_complete,
@@ -602,17 +602,12 @@ class ResearchBot(discord.Client):
 
         # Capture the session as episodic experience + a durable council lesson,
         # so future ideation builds on it (recall seeds round 1).
-        if self.memory is not None:
-            channel = str(message.channel.id)
-            await self.memory.log_experience(
-                "council_session",
-                f"Consortium on '{session.topic}' converged after {result['rounds']} round(s).",
-                channel, {"topic": session.topic, "rel_path": result["rel_path"]},
-            )
-            await self.memory.record_lesson(
-                f"[council:{session.topic}] {result['ideas'][:1500]}",
-                kind="council", channel_id=channel,
-            )
+        from ..consortium import capture_council
+
+        await capture_council(
+            self.memory, str(message.channel.id), session.topic,
+            result["ideas"], result["rel_path"], rounds=result["rounds"],
+        )
 
         for chunk in _chunk(result["ideas"]):
             await message.channel.send(chunk)

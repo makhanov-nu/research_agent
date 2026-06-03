@@ -15,7 +15,7 @@ from .literature import build_literature_agent_tool
 
 def build_delegated_tools(
     *, llm, mcp_tools, writers, experiment_runner=None, consortium=None,
-    task_store=None, projects=None,
+    task_store=None, projects=None, memory=None,
 ) -> list[BaseTool]:
     tools: list[BaseTool] = []
 
@@ -30,7 +30,9 @@ def build_delegated_tools(
     # Multi-model ideation consortium.
     if consortium is not None:
         tools.append(
-            build_consortium_tool(consortium, task_store=task_store, projects=projects)
+            build_consortium_tool(
+                consortium, task_store=task_store, projects=projects, memory=memory
+            )
         )
 
     # Experiment tools (lightweight, return concise status strings).

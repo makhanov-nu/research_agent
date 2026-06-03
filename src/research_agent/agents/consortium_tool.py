@@ -12,6 +12,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 
 from .. import projects as projects_pkg
+from ..consortium import capture_council
 from ..projects import save_council_proposal
 
 
@@ -21,7 +22,7 @@ def _channel(config: RunnableConfig | None) -> str | None:
     return (config.get("configurable") or {}).get("thread_id")
 
 
-def build_consortium_tool(consortium, task_store=None, projects=None) -> BaseTool:
+def build_consortium_tool(consortium, task_store=None, projects=None, memory=None) -> BaseTool:
     @tool("brainstorm_research_ideas")
     async def brainstorm_research_ideas(
         topic: str, focus: str = "", config: RunnableConfig = None
@@ -46,6 +47,10 @@ def build_consortium_tool(consortium, task_store=None, projects=None) -> BaseToo
         project = await projects_pkg.resolve_project(projects, config)
         council_rel = await save_council_proposal(
             projects, project, topic, result["ideas"]
+        )
+        # Capture the session to memory so future ideation builds on it.
+        await capture_council(
+            memory, _channel(config), topic, result["ideas"], result["rel_path"]
         )
 
         out = result["ideas"]
