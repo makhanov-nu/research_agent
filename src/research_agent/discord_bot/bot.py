@@ -40,7 +40,9 @@ HELP_TEXT = (
     "`!approve <id>` — approve and launch a pending experiment\n"
     "`!cancel <id>` — cancel a running experiment\n"
     "`!getfile <path>` — fetch a written output (e.g. a drafted LaTeX review)\n"
-    "`!ideate <topic>` — convene the multi-model consortium to propose 3 Q1 ideas\n"
+    "`!ideate <topic>` — open a multi-model consortium session (panel searches "
+    "lit+web, proposes); reply with feedback to run more rounds, `!ideate done` "
+    "to finalize, `!ideate cancel` to drop it\n"
     "`!tasks` — recent subagent tasks (the dashboard)\n"
     "`!task <id>` — a task's status + result\n"
     "`!trace <id>` — export a task's full trace (reasoning + tool calls) as a file\n"
@@ -127,6 +129,7 @@ class ResearchBot(discord.Client):
         self.memory: MemoryManager | None = None
         self.experiments = None
         self.consortium = None
+        self.consortium_sessions: dict = {}  # channel_id -> ConsortiumSession
         self.tasks = None
         self.dispatcher = None
         self.llm = None
@@ -331,6 +334,13 @@ class ResearchBot(discord.Client):
             await message.channel.send("Hi — what are we researching?")
             return
 
+        # While a consortium session is live in this channel, plain replies are
+        # the researcher's feedback that drives the next round (not orchestrator chat).
+        session = self.consortium_sessions.get(thread_id)
+        if session is not None and not session.finalized:
+            await self._consortium_feedback(message, session, content)
+            return
+
         await self._handle_chat(message, content, config, thread_id)
 
     async def _handle_chat(self, message, content, config, thread_id) -> None:
@@ -444,34 +454,106 @@ class ResearchBot(discord.Client):
             f"({len(task.get('trace') or [])} steps): `!getfile traces/{out.name}`"
         )
 
-    async def _ideate(self, message, topic) -> None:
+    async def _ideate(self, message, arg) -> None:
+        """`!ideate <topic>` opens a session; `!ideate done` finalizes; `!ideate cancel` drops it."""
         if self.consortium is None:
             await message.channel.send(
                 "The consortium isn't configured (needs OPENROUTER_API_KEY)."
             )
             return
-        if not topic:
+
+        thread_id = str(message.channel.id)
+        session = self.consortium_sessions.get(thread_id)
+        sub = arg.strip().lower()
+
+        if sub in {"done", "finish", "finalize"}:
+            if session is None:
+                await message.channel.send("No active consortium session here. Start one with `!ideate <topic>`.")
+            else:
+                await self._finalize_consortium(message, session)
+            return
+        if sub in {"cancel", "stop", "abort"}:
+            if session is not None:
+                self.consortium_sessions.pop(thread_id, None)
+                await message.channel.send("Consortium session cancelled.")
+            else:
+                await message.channel.send("No active consortium session to cancel.")
+            return
+
+        if session is not None and not session.finalized:
+            # An active session exists; treat the argument (if any) as feedback.
+            if not arg.strip():
+                await message.channel.send(
+                    "A consortium session is already running here. Reply with your "
+                    "feedback to start the next round, or `!ideate done` to finalize."
+                )
+            else:
+                await self._consortium_feedback(message, session, arg.strip())
+            return
+
+        if not arg.strip():
             await message.channel.send("Usage: `!ideate <topic>`")
             return
 
+        # Start a fresh session and run round 1.
+        session = self.consortium.new_session(arg.strip())
+        self.consortium_sessions[thread_id] = session
         models = ", ".join(self.consortium.panel)
         await message.channel.send(
-            f"Convening the consortium on **{topic}**.\n"
-            f"Panel: {models}. They'll ground in the literature, then "
-            "propose → debate → synthesize. This takes a few minutes…"
+            f"Convening the consortium on **{arg.strip()}**.\n"
+            f"Panel: {models}. Each model searches the literature + web, then "
+            "proposes. I'll post round 1, then **you** steer: reply with your "
+            "opinion for another round, or `!ideate done` to finalize. (A few minutes…)"
         )
+        await self._run_consortium_round(message, session)
+
+    async def _consortium_feedback(self, message, session, feedback) -> None:
+        await self._run_consortium_round(message, session, feedback=feedback)
+
+    async def _run_consortium_round(self, message, session, feedback: str = "") -> None:
+        if session.busy:
+            await message.channel.send("The panel is still deliberating — one moment…")
+            return
+        session.busy = True
         try:
             async with message.channel.typing():
-                result = await self.consortium.ideate(topic)
+                digest = await session.run_round(feedback=feedback)
         except Exception:  # noqa: BLE001
-            logger.exception("Consortium failed")
-            await message.channel.send("The consortium hit an error. Check the logs.")
+            logger.exception("Consortium round failed")
+            await message.channel.send("The consortium hit an error this round. Check the logs.")
             return
+        finally:
+            session.busy = False
+
+        for chunk in _chunk(f"**Round {session.round_no}**\n\n{digest}"):
+            await message.channel.send(chunk)
+        await message.channel.send(
+            "Your move: reply with feedback for another round, or `!ideate done` "
+            "to have the chair synthesize the validated proposal."
+        )
+
+    async def _finalize_consortium(self, message, session) -> None:
+        if session.busy:
+            await message.channel.send("The panel is still deliberating — one moment…")
+            return
+        session.busy = True
+        try:
+            async with message.channel.typing():
+                result = await session.finalize()
+        except Exception:  # noqa: BLE001
+            logger.exception("Consortium finalize failed")
+            await message.channel.send("The chair hit an error synthesizing. Check the logs.")
+            session.busy = False
+            return
+        self.consortium_sessions.pop(str(message.channel.id), None)
 
         for chunk in _chunk(result["ideas"]):
             await message.channel.send(chunk)
         await message.channel.send(
-            f"Full shared-session transcript: `!getfile {result['rel_path']}`"
+            f"Converged after {result['rounds']} round(s). Full transcript: "
+            f"`!getfile {result['rel_path']}`\n"
+            "Want me to hand this to the methodology writer for a detailed spec? "
+            "Just say the word."
         )
 
     async def _send_file(self, message, relpath: str) -> None:

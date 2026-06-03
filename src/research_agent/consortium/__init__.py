@@ -6,6 +6,6 @@ other — through propose -> debate -> chair synthesis, converging on a few
 Q1-level research ideas grounded in the literature.
 """
 
-from .consortium import Consortium
+from .consortium import Consortium, ConsortiumSession
 
-__all__ = ["Consortium"]
+__all__ = ["Consortium", "ConsortiumSession"]

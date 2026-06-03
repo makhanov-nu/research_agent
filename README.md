@@ -42,7 +42,7 @@ recorded on a task dashboard you can inspect.
 | Capability | What you get |
 |---|---|
 | 📚 **Literature** | A research subagent owns the [paperclip](https://paperclip.gxl.ai) MCP tools and returns grounded, **cited** synthesis over papers, trials, and regulatory docs. |
-| 💡 **Ideation** (`!ideate`) | A multi-model **consortium** (Claude Opus, GPT-5.5, Gemini 3 Pro, DeepSeek-R1) grounds in the literature, then debates over a shared transcript and proposes **3 Q1-level ideas**. |
+| 💡 **Ideation** (`!ideate`) | A steerable multi-model **consortium** (Claude Opus, GPT-5.5, Gemini 3 Pro, DeepSeek-R1). Each panelist searches **paperclip + web (Tavily)**, debates over a shared transcript, and **you weigh in between rounds**; the chair synthesizes a **validated proposal** (proofs/formulae/what-where-why). |
 | 📐 **Methodology** | Designs a rigorous methodology (research questions, baselines/ablations, metrics, protocol, threats to validity), grounded in the literature, and writes it as a LaTeX `\section{Methodology}`. |
 | 📝 **LaTeX writing** | Drafts a literature review and full **paper** sections from your material, saving `.tex` / `.bib` to outputs. |
 | 🧪 **Experiments** | Runs jobs on a **separate GPU node** over SSH + Docker, with human approval before each launch. |

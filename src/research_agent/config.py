@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     # --- MCP servers (tools) ---
     paperclip_api_key: str = ""
     paperclip_url: str = "https://paperclip.gxl.ai/mcp"
+    # Tavily web search via its hosted MCP server (enables web search when set).
+    tavily_api_key: str = ""
+    tavily_mcp_url: str = "https://mcp.tavily.com/mcp/"
     # Optional JSON file declaring additional MCP servers.
     mcp_config_path: str = "mcp_servers.json"
 

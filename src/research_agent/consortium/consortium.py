@@ -1,14 +1,23 @@
-"""The shared-session ideation consortium."""
+"""The shared-session ideation consortium.
+
+A panel of frontier models (via OpenRouter) debates in ONE shared session. Each
+panelist is a tool-using agent — it searches the scientific literature (paperclip)
+and the web (Tavily) before speaking, reads the running transcript, and engages
+the others by name. The session is interactive: the researcher weighs in between
+rounds (`ConsortiumSession.run_round(feedback=...)`), and a chair synthesis turns
+the debate into a rigorous, validated research proposal (problem, novelty,
+theoretical justification + formulae, what/where/why to improve, risks, venue).
+
+`Consortium.ideate(...)` runs the same machinery non-interactively (round 1 +
+N debate rounds + synthesis) for the orchestrator's `brainstorm_research_ideas`
+tool.
+"""
 
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-
-from langchain_core.messages import HumanMessage, SystemMessage
-
-from ..llm import build_openrouter_chat, get_llm
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +38,11 @@ def render_transcript(transcript: list[tuple[str, str]]) -> str:
 
 
 def build_document(topic: str, final: str, transcript: list[tuple[str, str]]) -> str:
-    """Assemble the saved markdown: final ideas + full discussion appendix."""
+    """Assemble the saved markdown: final proposal + full discussion appendix."""
     parts = [
         f"# Research ideas — {topic}",
         "",
-        "## Selected ideas (chair synthesis)",
+        "## Validated proposal (chair synthesis)",
         final.strip(),
         "",
         "---",
@@ -45,117 +54,102 @@ def build_document(topic: str, final: str, transcript: list[tuple[str, str]]) ->
 
 def _panel_system(model: str) -> str:
     return (
-        f"You are {model}, one of several frontier AI models sitting on a research "
-        "ideation panel. This is ONE shared session: you can see everything other "
-        "panelists have said and must engage with it directly — build on, refine, "
-        "or push back against their points by name. Be rigorous, specific, and "
-        "honest about novelty; ground claims in the background literature provided."
+        f"You are {model}, one of several frontier AI models on a research ideation "
+        "panel. This is ONE shared session: you see everything other panelists and "
+        "the researcher have said, and must engage directly — build on, refine, or "
+        "push back against their points by name.\n\n"
+        "You have tools: a scientific literature search (paperclip) and web search "
+        "(Tavily). SEARCH before claiming novelty or SOTA — verify, don't guess; "
+        "cite real sources (arXiv id / DOI / URL) and never invent them.\n\n"
+        "Be rigorous and concrete. Where it matters, give the mathematical "
+        "formulation (LaTeX) and a theoretical justification or sketch of proof. For "
+        "every proposed improvement, state WHAT to change, WHERE (which component or "
+        "step), and WHY (the mechanism and the expected effect)."
     )
 
 
 _PROPOSE = (
-    "Round 1 — opening proposals. Propose 2-3 concrete, ambitious-but-feasible "
-    "research ideas on the topic, each targeting a top (Q1) conference or journal. "
-    "If earlier panelists already proposed ideas, react to theirs and differentiate "
-    "yours. For each idea give: title, core idea, novelty vs the background "
-    "literature, a rough method, and the expected contribution."
+    "Round 1 — opening proposals. First SEARCH the literature and the web to map the "
+    "state of the art and the concrete open gaps. Then propose 2-3 ambitious-but-"
+    "feasible research ideas, each targeting a top (Q1) venue. For each idea give: "
+    "**Title**; **Problem & motivation**; **Novelty** vs prior work (cite what "
+    "exists); **Method** with the key formulae/derivation; **What/Where/Why** it "
+    "improves; **Expected contribution**. If earlier panelists already proposed "
+    "ideas, react to theirs and differentiate yours."
 )
 
 _DEBATE = (
-    "Debate round — critique and converge. Engage directly with the other "
-    "panelists' ideas: challenge novelty, feasibility, and impact; merge or improve "
-    "where useful; and argue toward the strongest 3 candidates. Explicitly flag any "
-    "idea that likely already exists in the literature."
+    "Debate round — critique and converge. SEARCH to verify any contested claim. "
+    "Engage the other panelists' ideas by name: challenge novelty, feasibility, and "
+    "impact with theoretical arguments or counterexamples (include formulae where "
+    "useful), merge or improve where it helps, and argue toward the single strongest "
+    "candidate. Explicitly flag (with a citation) anything that already exists."
 )
 
-_GROUND_SYSTEM = (
-    "You are preparing a tight background brief for a research ideation panel. Use "
-    "the literature tools to find what already exists on the topic, then write a "
-    "concise summary of the state of the art and — most importantly — the concrete "
-    "open gaps and opportunities. Cite real papers you retrieved; do not invent any."
+_FEEDBACK_NOTE = (
+    "\n\nThe researcher just added feedback above. Address it DIRECTLY: incorporate "
+    "it, or push back with reasons, and refine the leading idea accordingly."
 )
 
 
-def _chair_synthesis_prompt(topic: str) -> str:
+def _chair_prompt(topic: str) -> str:
     return (
-        "You are the chair. Using the background brief and the full panel discussion "
-        f"above, select and refine EXACTLY 3 research ideas on '{topic}' most likely "
-        "to yield Q1 conference/journal papers. For each idea provide: **Title**, "
-        "**Problem & motivation**, **Novelty** (explicitly contrasted with the "
-        "background literature), **Method sketch**, **Why Q1 / expected impact**, "
-        "**Key risks**, and **Suggested venue(s)**. Be concrete and honest about "
-        "novelty risk. Format in clean Markdown."
+        "You are the chair. Using the full panel discussion and the researcher's "
+        f"feedback above, write the VALIDATED research proposal on '{topic}' the "
+        "panel converged on — the single strongest idea, plus 1-2 brief alternatives. "
+        "For the main idea provide: **Title**, **Problem & motivation**, **Novelty** "
+        "(explicitly contrasted with cited prior work), **Theoretical justification** "
+        "(formal statement + formulae/proof sketch), **Method**, **What/Where/Why** "
+        "each improvement helps, **Experiments to validate it**, **Key risks**, and "
+        "**Suggested venue(s)**. Be concrete and honest about novelty risk. Clean "
+        "Markdown; keep LaTeX for math."
     )
 
 
 class Consortium:
     def __init__(self, lit_tools, panel_models, chair_model, output_dir,
                  temperature: float = 0.6, rounds: int = 1):
-        self.lit_tools = lit_tools or []
+        # `lit_tools` is the shared MCP tool pool (paperclip + Tavily web search).
+        self.tools = lit_tools or []
         self.panel = list(panel_models)
         self.chair_model = chair_model
         self.output_dir = Path(output_dir) / "ideas"
         self.temperature = temperature
         self.rounds = max(0, rounds)
 
-    async def _ground(self, topic: str, focus: str) -> str:
+    def new_session(self, topic: str, focus: str = "") -> "ConsortiumSession":
+        return ConsortiumSession(self, topic, focus)
+
+    async def _agent_say(self, model: str, instruction: str,
+                        transcript: list[tuple[str, str]]) -> str:
+        """Run a tool-using agent (panelist or chair) over the shared transcript."""
         from langgraph.prebuilt import create_react_agent
 
-        agent = create_react_agent(get_llm(), self.lit_tools, prompt=_GROUND_SYSTEM)
-        task = f"Topic: {topic}" + (f"\nFocus: {focus}" if focus else "")
+        from ..llm import build_openrouter_chat
+
+        agent = create_react_agent(
+            build_openrouter_chat(model, self.temperature, max_tokens=6000),
+            self.tools, prompt=_panel_system(model),
+        )
+        content = (
+            f"Panel discussion so far:\n\n{render_transcript(transcript)}\n\n"
+            f"---\n{instruction}"
+        )
         try:
             res = await agent.ainvoke(
-                {"messages": [("user", task)]}, config={"recursion_limit": 40}
+                {"messages": [("user", content)]}, config={"recursion_limit": 30}
             )
             return _flatten(res["messages"][-1].content)
-        except Exception:  # noqa: BLE001
-            logger.exception("Consortium grounding failed")
-            return "(background brief unavailable)"
-
-    async def _speak(self, model: str, instruction: str,
-                     transcript: list[tuple[str, str]]) -> str:
-        messages = [
-            SystemMessage(content=_panel_system(model)),
-            HumanMessage(
-                content=(
-                    f"Panel discussion so far:\n\n{render_transcript(transcript)}\n\n"
-                    f"---\n{instruction}"
-                )
-            ),
-        ]
-        try:
-            resp = await build_openrouter_chat(model, self.temperature).ainvoke(messages)
-            return _flatten(resp.content)
-        except Exception as exc:  # noqa: BLE001 — one model failing must not abort the panel
-            logger.exception("Panelist %s failed", model)
+        except Exception as exc:  # noqa: BLE001 — one model failing must not abort
+            logger.exception("Consortium agent %s failed", model)
             return f"[{model} could not respond: {exc}]"
 
-    async def ideate(self, topic: str, focus: str = "") -> dict:
-        transcript: list[tuple[str, str]] = []
-
-        grounding = await self._ground(topic, focus)
-        transcript.append(("Background (literature)", grounding))
-
-        # Round 1: opening proposals (sequential so each hears the prior speakers).
-        for model in self.panel:
-            transcript.append((model, await self._speak(model, _PROPOSE, transcript)))
-
-        # Debate rounds.
-        for _ in range(self.rounds):
-            for model in self.panel:
-                transcript.append((model, await self._speak(model, _DEBATE, transcript)))
-
-        # Chair synthesis over the full shared transcript.
-        final = await self._speak(
-            self.chair_model, _chair_synthesis_prompt(topic), transcript
-        )
-
-        document = build_document(topic, final, transcript)
-        path, rel_path = self._save(topic, document)
-        return {"ideas": final, "path": path, "rel_path": rel_path, "n_models": len(self.panel)}
+    async def _synthesize(self, topic: str,
+                         transcript: list[tuple[str, str]]) -> str:
+        return await self._agent_say(self.chair_model, _chair_prompt(topic), transcript)
 
     def _save(self, topic: str, document: str) -> tuple[str, str]:
-        from ..writing.lit_review import slugify
+        from ..writing.latex import slugify
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -163,3 +157,59 @@ class Consortium:
         path = self.output_dir / name
         path.write_text(document)
         return str(path), f"ideas/{name}"
+
+    async def ideate(self, topic: str, focus: str = "") -> dict:
+        """Non-interactive run (round 1 + N debate rounds + synthesis) for the tool."""
+        session = self.new_session(topic, focus)
+        await session.run_round()  # round 1: propose
+        for _ in range(self.rounds):
+            await session.run_round()  # debate
+        return await session.finalize()
+
+
+class ConsortiumSession:
+    """A live, per-channel ideation session the researcher steers between rounds."""
+
+    def __init__(self, consortium: Consortium, topic: str, focus: str = ""):
+        self.c = consortium
+        self.topic = topic
+        self.focus = focus
+        self.transcript: list[tuple[str, str]] = []
+        self.round_no = 0
+        self.busy = False
+        self.finalized = False
+
+    @property
+    def panel(self) -> list[str]:
+        return self.c.panel
+
+    async def run_round(self, feedback: str = "") -> str:
+        """Run one debate round; return a digest of this round's responses."""
+        self.round_no += 1
+        if self.round_no == 1 and self.focus:
+            self.transcript.append(("Focus", self.focus))
+        if feedback:
+            self.transcript.append(("Researcher (you)", feedback))
+
+        instruction = _PROPOSE if self.round_no == 1 else _DEBATE
+        if feedback:
+            instruction += _FEEDBACK_NOTE
+
+        for model in self.panel:
+            text = await self.c._agent_say(model, instruction, self.transcript)
+            self.transcript.append((model, text))
+        return self._round_digest()
+
+    def _round_digest(self) -> str:
+        last = self.transcript[-len(self.panel):] if self.panel else []
+        return "\n\n".join(f"**{model}**\n{text}" for model, text in last)
+
+    async def finalize(self) -> dict:
+        final = await self.c._synthesize(self.topic, self.transcript)
+        document = build_document(self.topic, final, self.transcript)
+        path, rel_path = self.c._save(self.topic, document)
+        self.finalized = True
+        return {
+            "ideas": final, "path": path, "rel_path": rel_path,
+            "n_models": len(self.panel), "rounds": self.round_no,
+        }

@@ -43,6 +43,13 @@ def _builtin_servers() -> dict:
             "transport": "streamable_http",
             "headers": {"X-API-Key": settings.paperclip_api_key},
         }
+    if settings.tavily_api_key:
+        # Tavily's hosted MCP takes the key as a query param on the URL.
+        sep = "&" if "?" in settings.tavily_mcp_url else "?"
+        servers["tavily"] = {
+            "url": f"{settings.tavily_mcp_url}{sep}tavilyApiKey={settings.tavily_api_key}",
+            "transport": "streamable_http",
+        }
     return servers
 
 
