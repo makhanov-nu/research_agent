@@ -76,8 +76,12 @@ class Settings(BaseSettings):
     compute_ssh_key: str = ""  # private key path; empty -> default keys / agent
     # Remote directory under which per-experiment workspaces/outputs live.
     compute_workdir: str = "~/research_agent_runs"
-    # Default container image for runs (override per experiment).
+    # Base image the universal experiment image is built FROM.
     compute_base_image: str = "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime"
+    # The universal experiment image (built once per box, or a registry ref to
+    # pull). Default runs use this; it bakes the common ML stack so jobs skip
+    # re-installing it. A local tag (no registry host) is built on the box.
+    experiment_image: str = "research-agent/experiment:latest"
     # Default docker --gpus value ("all", "0", or "" to disable GPU access).
     compute_default_gpus: str = "all"
     # Shared docker network (on the GPU box) joining experiment containers to the

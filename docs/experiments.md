@@ -10,6 +10,13 @@ GPU-in-container smoke test, and starts an MLflow server — so nothing needs to
 pre-installed. Each experiment records the box it ran on, so status/logs/poll keep
 hitting the right host even after a new box is attached.
 
+A **universal experiment image** (`EXPERIMENT_IMAGE`, see
+`docker/experiment.Dockerfile`) bakes the common ML stack (torch+CUDA, datasets,
+transformers, accelerate, optuna, mlflow, scikit-learn, …) so jobs don't reinstall
+it each run. It's built once on the box at provision time (from the embedded
+Dockerfile over SSH, no upload), or `docker pull`ed if `EXPERIMENT_IMAGE` is a
+registry reference. Jobs add only their *extra* deps via a small requirements.txt.
+
 For the full design — backend abstraction, job lifecycle, safety — see
 [Experiment runner (design)](experiment-runner.md).
 

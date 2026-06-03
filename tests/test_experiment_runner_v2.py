@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from research_agent.experiments.coder import parse_files
+from research_agent.experiments.image import build_experiment_dockerfile
 from research_agent.experiments.mlflow import (
     api_url,
     best_run,
@@ -60,6 +61,18 @@ def test_best_run_max_and_min():
     assert best_run(resp, "acc", "min")["run_id"] == "a"
     assert best_run({"runs": []}, "acc") is None
     assert best_run(resp, "missing") is None
+
+
+# --- universal experiment image ----------------------------------------------
+
+
+def test_build_experiment_dockerfile():
+    df = build_experiment_dockerfile("pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime")
+    assert df.startswith("FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime\n")
+    assert "pip install --no-cache-dir" in df
+    assert "optuna" in df and "mlflow" in df and "datasets" in df
+    # single FROM, single RUN — builds from stdin with no context
+    assert df.count("FROM ") == 1
 
 
 # --- coder file parsing -------------------------------------------------------

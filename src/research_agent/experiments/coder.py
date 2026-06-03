@@ -37,8 +37,10 @@ metrics). Log the best value/params to the parent run.
 5. Summary: at the end, append ONE json object per line to /output/metrics.jsonl \
 with the headline metrics (include `best_value` and key `best_params`), and save \
 any model/plots under /output.
-6. Provide a `requirements.txt` pinning the libraries you import (the base image \
-already has torch + CUDA; add datasets, transformers, optuna, mlflow, etc.).
+6. The runtime image ALREADY has: torch + CUDA, datasets, transformers, \
+accelerate, evaluate, optuna, mlflow, scikit-learn, scipy, pandas, numpy, \
+sentencepiece, tqdm. Do NOT reinstall these. Only add a `requirements.txt` if you \
+import something NOT in that list (keep it minimal); otherwise omit it.
 
 Output format — emit each file as:
 === FILE: <relative/path> ===

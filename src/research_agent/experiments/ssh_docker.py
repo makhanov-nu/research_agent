@@ -20,6 +20,7 @@ from pathlib import PurePosixPath
 from urllib.parse import urlencode
 
 from ..config import settings
+from .image import build_experiment_dockerfile
 from .mlflow import api_url, build_mlflow_server_command
 from .types import Artifact, JobHandle, JobSpec, JobState, JobStatus
 
@@ -213,10 +214,35 @@ class SSHDockerBackend:
         """Install Docker + the NVIDIA Container Toolkit on a fresh Ubuntu box.
 
         Idempotent: skips anything already present. Requires sudo (or root).
-        Returns a report ending with a GPU-in-container smoke check.
+        Returns a report ending with a GPU-in-container smoke check, then builds
+        the universal experiment image so the first run launches fast.
         """
         out = await self._ssh_checked("bash -s", stdin=_PROVISION_SCRIPT)
-        return out.strip()
+        image_note = await self.ensure_image()
+        return out.strip() + ("\n" + image_note if image_note else "")
+
+    async def ensure_image(self) -> str:
+        """Ensure the universal experiment image exists on the box (build or pull).
+
+        Idempotent: present -> no-op; a registry ref -> `docker pull`; otherwise
+        build from the embedded Dockerfile over stdin (no build context needed).
+        """
+        img = settings.experiment_image
+        _, present, _ = await self._ssh(
+            f"docker image inspect {shlex.quote(img)} >/dev/null 2>&1 "
+            f"&& echo yes || echo no"
+        )
+        if present.strip() == "yes":
+            return ""
+        # A registry-qualified ref (has a host with a dot or port): try to pull.
+        head = img.split("/", 1)[0]
+        if "/" in img and ("." in head or ":" in head):
+            code, _, _ = await self._ssh(f"docker pull {shlex.quote(img)}")
+            if code == 0:
+                return f"Pulled experiment image {img}."
+        dockerfile = build_experiment_dockerfile(settings.compute_base_image)
+        await self._ssh_checked(f"docker build -t {shlex.quote(img)} -", stdin=dockerfile)
+        return f"Built experiment image {img}."
 
     # -- MLflow infra (shared network + tracking server on the GPU box) --
 
@@ -239,6 +265,11 @@ class SSHDockerBackend:
         )
         await self._ssh_checked(" ".join(shlex.quote(a) for a in argv))
         logger.info("Started MLflow server %s on the compute node.", name)
+
+    async def ensure_ready(self) -> None:
+        """Make sure both the MLflow infra and the experiment image are present."""
+        await self.ensure_infra()
+        await self.ensure_image()
 
     async def mlflow_get(self, path: str, params: dict | None = None) -> dict | None:
         """GET an MLflow REST endpoint on the remote (tunnelled over SSH)."""
@@ -274,8 +305,8 @@ class SSHDockerBackend:
         base, ws_remote, out_remote = self._remote_paths(spec.experiment_id)
         container = f"ra_exp_{spec.experiment_id}"
 
-        # Ensure the MLflow server + shared network exist before launching.
-        await self.ensure_infra()
+        # Ensure the MLflow server, shared network, and experiment image exist.
+        await self.ensure_ready()
 
         # Remote dirs.
         await self._ssh_checked(

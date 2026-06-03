@@ -165,7 +165,7 @@ class ExperimentRunner:
 
         cfg.update(
             {
-                "image": image or settings.compute_base_image,
+                "image": image or settings.experiment_image,
                 "command": shlex.split(command),
                 "resources": {
                     "gpus": settings.compute_default_gpus if gpus is None else gpus,
