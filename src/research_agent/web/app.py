@@ -90,8 +90,7 @@ def create_app():
         resp = RedirectResponse("/")
         resp.set_cookie(
             auth.COOKIE_NAME, auth.seal_session(user), max_age=auth.SESSION_MAX_AGE,
-            httponly=True, samesite="lax",
-            secure=settings.web_base_url.startswith("https"),
+            httponly=True, samesite="lax", secure=settings.web_is_https,
         )
         return resp
 

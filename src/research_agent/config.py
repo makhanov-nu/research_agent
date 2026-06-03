@@ -134,6 +134,9 @@ class Settings(BaseSettings):
     # WorkOS AuthKit credentials (https://workos.com/docs/authkit/overview).
     workos_api_key: str = ""
     workos_client_id: str = ""
+    # Explicit callback URL (must match the WorkOS dashboard). When empty, it's
+    # derived as <WEB_BASE_URL>/auth/callback.
+    workos_redirect_uri: str = ""
     # Comma-separated allowlist of emails permitted to sign in ("" = allow any
     # successfully-authenticated WorkOS user).
     web_allowed_emails: str = ""
@@ -156,7 +159,12 @@ class Settings(BaseSettings):
 
     @property
     def web_redirect_uri(self) -> str:
-        return self.web_base_url.rstrip("/") + "/auth/callback"
+        # Prefer an explicit WORKOS_REDIRECT_URI; else derive from the base URL.
+        return self.workos_redirect_uri or (self.web_base_url.rstrip("/") + "/auth/callback")
+
+    @property
+    def web_is_https(self) -> bool:
+        return self.web_redirect_uri.startswith("https") or self.web_base_url.startswith("https")
 
     # --- Ideation consortium (multi-model debate via OpenRouter) ---
     # Comma-separated OpenRouter model slugs forming the panel.
