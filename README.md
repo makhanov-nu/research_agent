@@ -85,19 +85,29 @@ flowchart TB
 
     you -- DM / @-mention --> bot
     bot -- responses --> you
-    bot -- "1.delegate (create task)" --> subs
-    subs -- "2.write result + full trace" --> dash
-    dash -- "3.trigger: result ready" --> bot
-    bot -- "4.read result · inspect (!tasks · !task · !trace)" --> dash
+
+    bot -- "quick job: ask and wait" --> subs
+    subs -- "answer inline" --> bot
+
+    bot -- "deep job: dispatch + tag agent" --> subs
+    subs -- "write result + full trace" --> dash
+    dash -- "trigger: result ready" --> bot
+    bot -- "read result · inspect (!tasks · !task · !trace)" --> dash
+
     lit -. external papers .-> paperclip[(paperclip MCP)]
 ```
 
-> **How to read it:** the **task dashboard is the single source of truth** for
-> results. A subagent never hands its answer straight back to the orchestrator —
-> it (1) is created as a task, (2) writes its result *and* full reasoning/tool-call
-> trace to the dashboard, which (3) triggers the orchestrator ("result ready"), so
-> it (4) reads the result back from the dashboard. The orchestrator's context only
-> ever sees the result — the trace stays in the dashboard (pull it with `!trace`).
+> **How to read it.** The orchestrator delegates two ways:
+>
+> - **Quick job** — it asks a subagent and waits, answering you in the same turn.
+> - **Deep job** — it *dispatches* the task to the board (tagging the right agent)
+>   and keeps chatting. The subagent writes its result + full trace to the
+>   dashboard, which **triggers** the orchestrator ("result ready"), and it
+>   **reads the result back from the dashboard**.
+>
+> Either way, every task's result and full reasoning/tool-call **trace are
+> recorded to the dashboard** (the single source of truth) — the orchestrator's
+> context only ever sees the result; pull the trace with `!trace`.
 
 - **Subagents** return only their final answer; the full trace lands in the task
   `trace` column via `TaskRecorderMiddleware`.
