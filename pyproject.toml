@@ -30,9 +30,18 @@ docs = [
     "mkdocstrings[python]>=0.26",
     "pymdown-extensions>=10",
 ]
+web = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+    "sse-starlette>=2.1",
+    "workos>=5",
+    "itsdangerous>=2.2",
+    "psycopg[binary,pool]>=3.1",
+]
 
 [project.scripts]
 research-agent = "research_agent.main:main"
+research-agent-web = "research_agent.web.main:main"
 
 [build-system]
 requires = ["setuptools>=68"]

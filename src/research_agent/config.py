@@ -124,6 +124,28 @@ class Settings(BaseSettings):
     # Directory for written outputs (LaTeX literature reviews, drafts, etc.).
     output_dir: str = "outputs"
 
+    # --- Web frontend (FastAPI + React SPA; auth via WorkOS AuthKit) ---
+    web_host: str = "0.0.0.0"
+    web_port: int = 8800
+    # Public base URL the browser hits (used to build the auth redirect URI).
+    web_base_url: str = "http://localhost:8800"
+    # Secret used to sign the session cookie (set a long random value).
+    web_session_secret: str = ""
+    # WorkOS AuthKit credentials (https://workos.com/docs/authkit/overview).
+    workos_api_key: str = ""
+    workos_client_id: str = ""
+    # Comma-separated allowlist of emails permitted to sign in ("" = allow any
+    # successfully-authenticated WorkOS user).
+    web_allowed_emails: str = ""
+
+    @property
+    def allowed_emails(self) -> list[str]:
+        return [e.strip().lower() for e in self.web_allowed_emails.split(",") if e.strip()]
+
+    @property
+    def web_redirect_uri(self) -> str:
+        return self.web_base_url.rstrip("/") + "/auth/callback"
+
     # --- Ideation consortium (multi-model debate via OpenRouter) ---
     # Comma-separated OpenRouter model slugs forming the panel.
     consortium_models: str = (
