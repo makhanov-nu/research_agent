@@ -31,3 +31,7 @@ outputs/
 # MkDocs build output
 site/
 .cache/
+
+# Frontend (Vite/React)
+node_modules/
+src/research_agent/web/frontend/dist/
