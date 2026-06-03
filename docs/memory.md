@@ -84,12 +84,25 @@ flowchart LR
   before it writes/relaunches an experiment; the consortium seeds round 1 with
   the project's prior insights. So past mistakes actively shape future runs.
 
-## Observability (LangSmith)
+## Observability (local tracing)
 
-Set `LANGSMITH_API_KEY` to trace every agent/graph run to
-[LangSmith](https://smith.langchain.com) — full step-by-step tool/LLM traces.
-It's enabled at import time (no code changes). The in-app task dashboard
-(`!trace <id>` and the web UI) also records each subagent's reasoning + tool calls.
+For full step-by-step agent traces, the recommended path is **Arize Phoenix** —
+free, self-hosted, and entirely **local** (no SaaS, no bill):
+
+```bash
+pip install -e ".[obs]"
+docker compose up -d phoenix     # trace UI + collector on http://localhost:6006
+# then in .env:
+PHOENIX_ENABLED=true
+```
+
+`setup_tracing()` (called from both entrypoints) auto-instruments
+LangChain/LangGraph via OpenInference, so every agent + graph run streams to your
+local Phoenix and is viewable there — a LangSmith-like UI you own.
+
+`LANGSMITH_API_KEY` remains an optional **paid** hosted alternative (off unless
+set). Either way, the in-app task dashboard (`!trace <id>` and the web UI) still
+records each subagent's reasoning + tool calls in Postgres.
 
 ## Commands
 

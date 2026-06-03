@@ -20,5 +20,18 @@ services:
       timeout: 5s
       retries: 5
 
+  # Local, self-hosted trace UI (free). Agent/graph runs stream here when
+  # PHOENIX_ENABLED=true. UI + OTLP collector on 6006; data persisted locally.
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports:
+      - "127.0.0.1:6006:6006"
+    volumes:
+      - phoenixdata:/mnt/data
+    environment:
+      PHOENIX_WORKING_DIR: /mnt/data
+
 volumes:
   pgdata:
+  phoenixdata:
+

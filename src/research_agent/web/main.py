@@ -10,7 +10,10 @@ from ..config import settings
 def main() -> None:
     import uvicorn
 
+    from ..observability import setup_tracing
+
     logging.basicConfig(level=logging.INFO)
+    setup_tracing()
     uvicorn.run(
         "research_agent.web.app:create_app",
         factory=True,

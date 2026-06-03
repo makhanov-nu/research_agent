@@ -6,6 +6,7 @@ import logging
 
 from .config import settings
 from .discord_bot import ResearchBot
+from .observability import setup_tracing
 
 
 def main() -> None:
@@ -13,6 +14,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    setup_tracing()  # local Phoenix tracing if PHOENIX_ENABLED
 
     if not settings.discord_token:
         raise SystemExit(

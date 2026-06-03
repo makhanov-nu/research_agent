@@ -138,9 +138,15 @@ class Settings(BaseSettings):
     # successfully-authenticated WorkOS user).
     web_allowed_emails: str = ""
 
-    # --- Observability (LangSmith tracing of agent runs) ---
-    # When an API key is set, LangChain/LangGraph runs are traced to LangSmith
-    # (full step-by-step agent traces, like the in-app task trace but richer).
+    # --- Observability ---
+    # Arize Phoenix: free, self-hosted, local trace UI (recommended). When
+    # enabled, agent/graph runs are auto-instrumented and streamed to a local
+    # Phoenix collector. `phoenix_endpoint` is the OTLP traces endpoint
+    # (e.g. http://localhost:6006/v1/traces); empty uses Phoenix's default.
+    phoenix_enabled: bool = False
+    phoenix_project: str = "research-agent"
+    phoenix_endpoint: str = ""
+    # LangSmith: optional hosted alternative (paid). Off unless a key is set.
     langsmith_api_key: str = ""
     langsmith_project: str = "research-agent"
     langsmith_endpoint: str = "https://api.smith.langchain.com"
