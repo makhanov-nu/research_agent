@@ -1,0 +1,16 @@
+[Unit]
+Description=Research Agent web UI (FastAPI + SPA)
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=nursultanmakhanov
+WorkingDirectory=/home/nursultanmakhanov/research_agent
+# Uses the same venv + .env as the bot. Binds to localhost; Caddy fronts it.
+ExecStart=/home/nursultanmakhanov/research_agent/.venv/bin/research-agent-web
+Restart=always
+RestartSec=3
+Environment=WEB_HOST=127.0.0.1
+
+[Install]
+WantedBy=multi-user.target

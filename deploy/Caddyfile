@@ -1,0 +1,19 @@
+# Reverse proxy for the Research Agent web UI, behind Cloudflare.
+# The app binds 127.0.0.1:8800; Caddy terminates the origin connection and
+# forwards to it. Pick ONE site block below to match your Cloudflare SSL mode.
+
+# === Cloudflare "Full (strict)" with a Cloudflare Origin Certificate (recommended) ===
+# Create the cert in Cloudflare → SSL/TLS → Origin Server, save the two files,
+# then use this block. Caddy serves HTTPS on 443 with that cert.
+airesearchagent.uk {
+	tls /etc/caddy/origin.pem /etc/caddy/origin.key
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8800
+}
+
+# === Cloudflare "Flexible" (no origin cert; CF→origin is plain HTTP) ===
+# Comment out the block above and use this instead. Caddy serves plain HTTP/80.
+# http://airesearchagent.uk {
+# 	encode zstd gzip
+# 	reverse_proxy 127.0.0.1:8800
+# }
