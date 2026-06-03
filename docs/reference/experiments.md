@@ -4,6 +4,14 @@
 
 ::: research_agent.experiments.runner
 
+## Codex coder
+
+::: research_agent.experiments.coder
+
+## MLflow integration
+
+::: research_agent.experiments.mlflow
+
 ## SSH + Docker backend
 
 ::: research_agent.experiments.ssh_docker

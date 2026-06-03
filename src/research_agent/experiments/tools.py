@@ -18,8 +18,8 @@ def _channel(config: RunnableConfig | None) -> str | None:
     return (config.get("configurable") or {}).get("thread_id")
 
 
-def build_experiment_tools(runner) -> list[BaseTool]:
-    """Return the experiment tools bound to `runner`."""
+def build_experiment_tools(runner, coder=None) -> list[BaseTool]:
+    """Return the experiment tools bound to `runner` (and an optional `coder`)."""
 
     @tool
     async def propose_experiment(
@@ -31,6 +31,32 @@ def build_experiment_tools(runner) -> list[BaseTool]:
         """
         exp_id = await runner.propose(title, hypothesis, plan, _channel(config))
         return f"Created experiment #{exp_id}: {title}"
+
+    @tool
+    async def author_experiment_code(experiment_id: int, spec: str) -> str:
+        """Have the Codex coder write the experiment's code from a spec.
+
+        Pass a detailed spec (the methodology / technical specification: task,
+        datasets, model, search space, metrics). The coder writes a runnable
+        train.py (Optuna HPO + HuggingFace data + MLflow logging + a
+        /output/metrics.jsonl summary) plus requirements.txt into the workspace.
+        """
+        if coder is None:
+            return "No coder model is configured (set OPENROUTER_API_KEY)."
+        try:
+            files = await coder.author(spec)
+        except Exception as exc:  # noqa: BLE001
+            return f"[coder failed to author the experiment: {exc}]"
+        written = await runner.write_code(experiment_id, files)
+        return (
+            f"Codex authored {len(written)} file(s) for experiment "
+            f"#{experiment_id}: {', '.join(written)}. Review, then launch."
+        )
+
+    @tool
+    async def experiment_mlflow(experiment_id: int) -> str:
+        """Get the experiment's MLflow run: params + latest/best metrics."""
+        return await runner.mlflow_summary(experiment_id)
 
     @tool
     async def write_experiment_code(experiment_id: int, files: dict[str, str]) -> str:
@@ -77,9 +103,11 @@ def build_experiment_tools(runner) -> list[BaseTool]:
 
     return [
         propose_experiment,
+        author_experiment_code,
         write_experiment_code,
         launch_experiment,
         experiment_status,
         experiment_logs,
+        experiment_mlflow,
         cancel_experiment,
     ]

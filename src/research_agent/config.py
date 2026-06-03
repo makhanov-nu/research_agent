@@ -80,6 +80,36 @@ class Settings(BaseSettings):
     compute_base_image: str = "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime"
     # Default docker --gpus value ("all", "0", or "" to disable GPU access).
     compute_default_gpus: str = "all"
+    # Shared docker network (on the GPU box) joining experiment containers to the
+    # MLflow server, so jobs can reach it by name.
+    compute_network: str = "ra-net"
+    # Persistent HuggingFace cache volume mounted into every job (so datasets and
+    # model weights are downloaded once and reused across runs/trials).
+    compute_hf_cache_volume: str = "ra-hf-cache"
+
+    # --- Experiment authoring (Codex-style coder model) ---
+    # OpenRouter slug for the model that writes/iterates experiment code.
+    experiment_coder_model: str = "openai/gpt-5.5"
+    # HuggingFace token passed into jobs (env-file) for dataset/model downloads.
+    hf_token: str = ""
+
+    # --- MLflow experiment tracking (server runs on the GPU box) ---
+    mlflow_enabled: bool = True
+    # MLflow tracking server container + image (started on the compute node).
+    mlflow_container: str = "ra-mlflow"
+    mlflow_image: str = "ghcr.io/mlflow/mlflow:v2.16.2"
+    # Port the server binds (to 127.0.0.1) on the compute node.
+    mlflow_port: int = 5000
+    # Docker named volume holding the MLflow backend store (sqlite) + artifacts.
+    mlflow_volume: str = "ra-mlflow-data"
+    # MLflow experiment all runs are grouped under.
+    mlflow_experiment_name: str = "research_agent"
+
+    @property
+    def mlflow_tracking_uri_internal(self) -> str:
+        """URI experiment containers use to reach MLflow (over the shared network)."""
+        return f"http://{self.mlflow_container}:{self.mlflow_port}"
+
     # Local directory where the agent authors experiment code before dispatch.
     experiment_workspace_dir: str = "workspace"
     # Local directory where fetched experiment artifacts are stored.

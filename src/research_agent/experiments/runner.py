@@ -37,6 +37,22 @@ class StateChange:
     message: str
 
 
+def _launch_env(experiment_id: int, base_env: dict) -> dict:
+    """Merge MLflow + HuggingFace env into the job's env (user values win)."""
+    from . import mlflow
+
+    injected: dict[str, str] = {}
+    if settings.mlflow_enabled:
+        injected["MLFLOW_TRACKING_URI"] = settings.mlflow_tracking_uri_internal
+        injected["MLFLOW_EXPERIMENT_NAME"] = settings.mlflow_experiment_name
+        injected["MLFLOW_RUN_NAME"] = mlflow.run_name(experiment_id)
+    if settings.hf_token:
+        injected["HF_TOKEN"] = settings.hf_token
+        injected["HUGGING_FACE_HUB_TOKEN"] = settings.hf_token
+    injected.update(base_env or {})  # explicit per-experiment env overrides defaults
+    return injected
+
+
 def read_latest_metrics(artifact_dir: str) -> dict:
     """Return the last JSON object from a metrics.jsonl in the artifact dir."""
     path = Path(artifact_dir) / "metrics.jsonl"
@@ -64,7 +80,41 @@ class ExperimentRunner:
 
     @property
     def enabled(self) -> bool:
+        # Tools are available whenever the registry is; a GPU box can be attached
+        # at runtime (ephemeral, per-experiment) via `set_compute`.
         return self.backend is not None and getattr(self.episodic, "enabled", False)
+
+    @property
+    def attached(self) -> bool:
+        """Whether a GPU box is currently attached (host configured)."""
+        return bool(getattr(self.backend, "configured", False))
+
+    # -- ephemeral GPU box (a fresh IP per experiment) --
+
+    async def set_compute(self, host: str, key: str | None = None) -> str:
+        self.backend.set_target(host, key=key)
+        return f"Attached compute box `{self.backend.user}@{self.backend.host}`."
+
+    async def provision(self) -> str:
+        if not self.attached:
+            return "No GPU box attached. Use `set_compute` / `!gpu <user@ip>` first."
+        return await self.backend.provision()
+
+    async def survey(self) -> str:
+        if not self.attached:
+            return "No GPU box attached."
+        return await self.backend.survey()
+
+    def _apply_target(self, cfg: dict) -> bool:
+        """Point the backend at the box an experiment was launched on, if recorded."""
+        target = cfg.get("compute")
+        if target and target.get("host"):
+            self.backend.set_target(
+                target["host"], user=target.get("user"),
+                port=target.get("port"), key=target.get("key"),
+            )
+            return True
+        return self.attached
 
     # -- registry helpers --
 
@@ -105,6 +155,11 @@ class ExperimentRunner:
         cfg = await self._config(experiment_id)
         if cfg is None:
             return f"Experiment #{experiment_id} not found."
+        if not self.attached:
+            return (
+                "No GPU box is attached. Attach one with `!gpu <user@ip>` "
+                "(it'll be provisioned automatically), then request the launch."
+            )
         if not self.workspace.list_files(experiment_id):
             return f"Experiment #{experiment_id} has no code yet — write code first."
 
@@ -140,13 +195,22 @@ class ExperimentRunner:
             return f"Experiment #{experiment_id} not found."
         if "command" not in cfg:
             return f"Experiment #{experiment_id} has no launch spec — request a launch first."
+        if not self.attached:
+            return "No GPU box attached. Use `!gpu <user@ip>` first, then `!approve`."
+
+        # Pin this experiment to the box it runs on, so later status/log/cancel
+        # calls hit the right (ephemeral) host even after a new box is attached.
+        cfg["compute"] = {
+            "host": self.backend.host, "user": self.backend.user,
+            "port": self.backend.port, "key": self.backend.key,
+        }
 
         res = cfg.get("resources", {})
         spec = JobSpec(
             experiment_id=experiment_id,
             image=cfg["image"],
             command=cfg["command"],
-            env=cfg.get("env", {}),
+            env=_launch_env(experiment_id, cfg.get("env", {})),
             resources=Resources(
                 gpus=res.get("gpus", ""),
                 memory=res.get("memory", ""),
@@ -182,6 +246,42 @@ class ExperimentRunner:
             return f"Experiment #{experiment_id} not found."
         return f"Experiment #{experiment_id} ({exp['title']}): {exp['status']}, metrics={exp.get('metrics')}"
 
+    async def mlflow_summary(self, experiment_id: int) -> str:
+        """Fetch the experiment's MLflow run (params + latest metrics) on demand."""
+        from . import mlflow
+
+        get = getattr(self.backend, "mlflow_get", None)
+        post = getattr(self.backend, "mlflow_post", None)
+        if not (settings.mlflow_enabled and get and post):
+            return "MLflow tracking is not configured for this runner."
+
+        by_name = await get(
+            "experiments/get-by-name",
+            {"experiment_name": settings.mlflow_experiment_name},
+        )
+        exp_id = (by_name or {}).get("experiment", {}).get("experiment_id")
+        if not exp_id:
+            return "No MLflow experiment recorded yet."
+        search = await post(
+            "runs/search",
+            {
+                "experiment_ids": [exp_id],
+                "filter": f"attributes.run_name = '{mlflow.run_name(experiment_id)}'",
+                "max_results": 50,
+            },
+        )
+        runs = (search or {}).get("runs") or []
+        if not runs:
+            return f"No MLflow run found yet for experiment #{experiment_id}."
+        metrics = mlflow.parse_metrics(runs[0])
+        params = mlflow.parse_params(runs[0])
+        lines = [f"MLflow run for experiment #{experiment_id} ({mlflow.run_name(experiment_id)}):"]
+        if params:
+            lines.append("params: " + ", ".join(f"{k}={v}" for k, v in params.items()))
+        if metrics:
+            lines.append("metrics: " + ", ".join(f"{k}={v}" for k, v in metrics.items()))
+        return "\n".join(lines) if len(lines) > 1 else lines[0] + " (no metrics logged yet)"
+
     async def get_logs(self, experiment_id: int, tail: int = 200) -> str:
         handle = await self._handle(experiment_id)
         if handle is None:
@@ -200,6 +300,7 @@ class ExperimentRunner:
         cfg = await self._config(experiment_id)
         if not cfg:
             return None
+        self._apply_target(cfg)  # talk to the box this experiment ran on
         return JobHandle.from_dict(cfg.get("handle"))
 
     # -- polling --
@@ -220,6 +321,8 @@ class ExperimentRunner:
         handle = JobHandle.from_dict(cfg.get("handle"))
         if handle is None:
             return None
+        if not self._apply_target(cfg):
+            return None  # box for this experiment isn't reachable/recorded
 
         status = await self.backend.status(handle)
         if status.state not in TERMINAL_STATES:

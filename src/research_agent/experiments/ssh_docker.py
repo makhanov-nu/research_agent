@@ -13,16 +13,53 @@ methods here wrap it with async subprocess execution of ssh/rsync.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shlex
 from pathlib import PurePosixPath
+from urllib.parse import urlencode
 
 from ..config import settings
+from .mlflow import api_url, build_mlflow_server_command
 from .types import Artifact, JobHandle, JobSpec, JobState, JobStatus
 
 logger = logging.getLogger(__name__)
 
 BACKEND_NAME = "ssh-docker"
+
+# Provisions a bare Ubuntu GPU box: Docker + NVIDIA Container Toolkit, then a
+# GPU-in-container smoke test. Idempotent; assumes the NVIDIA *driver* is present
+# (cloud GPU images ship it) and the SSH user has sudo/root.
+_PROVISION_SCRIPT = r"""
+set -euo pipefail
+SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+export DEBIAN_FRONTEND=noninteractive
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "[provision] installing docker..."
+  curl -fsSL https://get.docker.com | $SUDO sh
+fi
+
+if ! docker info 2>/dev/null | grep -qi 'Runtimes.*nvidia' && ! command -v nvidia-ctk >/dev/null 2>&1; then
+  echo "[provision] installing NVIDIA Container Toolkit..."
+  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+    | $SUDO gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+  curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+    | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+    | $SUDO tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
+  $SUDO apt-get update -y
+  $SUDO apt-get install -y nvidia-container-toolkit
+  $SUDO nvidia-ctk runtime configure --runtime=docker
+  $SUDO systemctl restart docker
+fi
+
+echo "[provision] versions:"
+docker --version
+echo "[provision] GPU-in-container smoke test:"
+$SUDO docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi \
+  --query-gpu=name,memory.total --format=csv,noheader || echo "[provision] WARNING: GPU smoke test failed"
+echo "[provision] done"
+"""
 
 
 # --- pure helpers (unit-tested) ------------------------------------------------
@@ -32,9 +69,16 @@ def build_docker_run_command(
     workspace_remote: str, output_remote: str,
     gpus: str = "", memory: str = "", pids_limit: int = 0,
     env_file_remote: str | None = None,
+    network: str = "", volumes: list[str] | None = None,
 ) -> list[str]:
-    """Build the argv for a detached `docker run`. Pure: no I/O."""
+    """Build the argv for a detached `docker run`. Pure: no I/O.
+
+    `network` joins a shared docker network (so the job can reach the MLflow
+    server by name); `volumes` are extra `-v` mounts (e.g. a persistent HF cache).
+    """
     args = ["docker", "run", "-d", "--name", name]
+    if network:
+        args += ["--network", network]
     if gpus:
         args += ["--gpus", gpus]
     if memory:
@@ -43,6 +87,8 @@ def build_docker_run_command(
         args += ["--pids-limit", str(pids_limit)]
     if env_file_remote:
         args += ["--env-file", env_file_remote]
+    for vol in volumes or []:
+        args += ["-v", vol]
     args += [
         "-v", f"{workspace_remote}:/workspace:ro",
         "-v", f"{output_remote}:/output",
@@ -87,6 +133,27 @@ class SSHDockerBackend:
         self.key = settings.compute_ssh_key
         self.workdir = settings.compute_workdir
 
+    # -- target management (the GPU box is ephemeral: a fresh IP per experiment) --
+
+    def set_target(
+        self, host: str, user: str | None = None, port: int | None = None,
+        key: str | None = None,
+    ) -> None:
+        """Point the backend at a (new) compute box. host may be 'user@ip'."""
+        if "@" in host and user is None:
+            user, host = host.split("@", 1)
+        self.host = host.strip()
+        if user:
+            self.user = user.strip()
+        if port:
+            self.port = port
+        if key is not None:
+            self.key = key
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.host and self.user)
+
     # -- low-level exec --
 
     def _ssh_base(self) -> list[str]:
@@ -129,11 +196,86 @@ class SSHDockerBackend:
             ssh += f" -i {shlex.quote(self.key)}"
         return ssh, f"{self.user}@{self.host}:{remote_path}"
 
+    # -- provisioning a bare-Ubuntu GPU box --
+
+    async def survey(self) -> str:
+        """Return a short report of the box: OS, GPU, docker, nvidia runtime."""
+        report = await self._ssh_checked(
+            "set +e; "
+            "echo OS: $(. /etc/os-release 2>/dev/null; echo $PRETTY_NAME); "
+            "echo GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | paste -sd '; ' - || echo none); "
+            "echo DOCKER: $(docker --version 2>/dev/null || echo none); "
+            "echo NVIDIA_RUNTIME: $(docker info 2>/dev/null | grep -i 'Runtimes' | grep -qi nvidia && echo yes || echo no)"
+        )
+        return report.strip()
+
+    async def provision(self) -> str:
+        """Install Docker + the NVIDIA Container Toolkit on a fresh Ubuntu box.
+
+        Idempotent: skips anything already present. Requires sudo (or root).
+        Returns a report ending with a GPU-in-container smoke check.
+        """
+        out = await self._ssh_checked("bash -s", stdin=_PROVISION_SCRIPT)
+        return out.strip()
+
+    # -- MLflow infra (shared network + tracking server on the GPU box) --
+
+    async def ensure_infra(self) -> None:
+        """Create the shared docker network and start the MLflow server (idempotent)."""
+        if not settings.mlflow_enabled:
+            return
+        net = settings.compute_network
+        await self._ssh(f"docker network create {shlex.quote(net)} >/dev/null 2>&1; true")
+        name = settings.mlflow_container
+        _, running, _ = await self._ssh(
+            f"docker inspect -f '{{{{.State.Running}}}}' {shlex.quote(name)} 2>/dev/null"
+        )
+        if running.strip() == "true":
+            return
+        await self._ssh(f"docker rm -f {shlex.quote(name)} >/dev/null 2>&1; true")
+        argv = build_mlflow_server_command(
+            container=name, image=settings.mlflow_image, network=net,
+            port=settings.mlflow_port, volume=settings.mlflow_volume,
+        )
+        await self._ssh_checked(" ".join(shlex.quote(a) for a in argv))
+        logger.info("Started MLflow server %s on the compute node.", name)
+
+    async def mlflow_get(self, path: str, params: dict | None = None) -> dict | None:
+        """GET an MLflow REST endpoint on the remote (tunnelled over SSH)."""
+        url = api_url(settings.mlflow_port, path)
+        if params:
+            url += "?" + urlencode(params)
+        code, out, _ = await self._ssh(f"curl -sf --max-time 15 {shlex.quote(url)}")
+        if code != 0 or not out.strip():
+            return None
+        try:
+            return json.loads(out)
+        except json.JSONDecodeError:
+            return None
+
+    async def mlflow_post(self, path: str, body: dict) -> dict | None:
+        """POST a JSON body to an MLflow REST endpoint on the remote, over SSH."""
+        url = api_url(settings.mlflow_port, path)
+        cmd = (
+            f"curl -sf --max-time 15 -H 'Content-Type: application/json' "
+            f"-X POST {shlex.quote(url)} -d @-"
+        )
+        code, out, _ = await self._ssh(cmd, stdin=json.dumps(body))
+        if code != 0 or not out.strip():
+            return None
+        try:
+            return json.loads(out)
+        except json.JSONDecodeError:
+            return None
+
     # -- ComputeBackend --
 
     async def submit(self, spec: JobSpec, workspace_local: str) -> JobHandle:
         base, ws_remote, out_remote = self._remote_paths(spec.experiment_id)
         container = f"ra_exp_{spec.experiment_id}"
+
+        # Ensure the MLflow server + shared network exist before launching.
+        await self.ensure_infra()
 
         # Remote dirs.
         await self._ssh_checked(
@@ -158,6 +300,15 @@ class SSHDockerBackend:
                 f"umask 077; cat > {shlex.quote(env_file_remote)}", stdin=body
             )
 
+        # Join the MLflow network and mount the persistent HF cache (datasets +
+        # model weights downloaded once and reused across runs/trials).
+        network = settings.compute_network if settings.mlflow_enabled else ""
+        volumes = []
+        if settings.compute_hf_cache_volume:
+            volumes.append(
+                f"{settings.compute_hf_cache_volume}:/root/.cache/huggingface"
+            )
+
         # Remove any stale container of the same name, then launch.
         await self._ssh(f"docker rm -f {container} >/dev/null 2>&1; true")
         argv = build_docker_run_command(
@@ -170,6 +321,8 @@ class SSHDockerBackend:
             memory=spec.resources.memory,
             pids_limit=spec.resources.pids_limit,
             env_file_remote=env_file_remote,
+            network=network,
+            volumes=volumes,
         )
         out = await self._ssh_checked(" ".join(shlex.quote(a) for a in argv))
         container_id = out.strip().splitlines()[-1] if out.strip() else container

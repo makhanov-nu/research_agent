@@ -132,10 +132,17 @@ class _FakeEpisodic:
 
 class _FakeBackend:
     name = "fake"
+    configured = True  # stands in for an attached GPU box
 
     def __init__(self):
         self.submitted = []
         self.state = JobState.RUNNING
+        self.host, self.user, self.port, self.key = "h", "u", 22, ""
+
+    def set_target(self, host, user=None, port=None, key=None):
+        self.host = host
+        if user:
+            self.user = user
 
     async def submit(self, spec, workspace_local):
         self.submitted.append(spec)

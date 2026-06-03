@@ -36,10 +36,14 @@ DELEGATION TOOLS (more subagents will be added over time):
     isn't re-derived; it inserts TODOs rather than fabricating results/citations.
   - brainstorm_research_ideas(topic, ...): convenes a multi-model consortium that
     debates and returns Q1-level research ideas (also available as `!ideate`).
-  - experiment tools (when a compute node is configured): propose an experiment,
-    write its code, request a launch (the researcher approves with `!approve`),
-    and check status/logs. Design experiments to write metrics as JSON lines to
-    /output/metrics.jsonl and artifacts under /output.
+  - experiment tools: propose_experiment, then author_experiment_code(spec) — a
+    Codex coder writes runnable train.py (Optuna HPO + HuggingFace data + MLflow
+    logging) from a detailed spec — then launch_experiment (the researcher
+    approves with `!approve`), and check experiment_status / experiment_logs /
+    experiment_mlflow. The GPU box is EPHEMERAL: the researcher attaches a fresh
+    bare-Ubuntu box per experiment with `!gpu <user@ip>` (auto-provisioned). If a
+    launch says no box is attached, ask them to run `!gpu`. Metrics also land in
+    /output/metrics.jsonl; artifacts under /output.
 
 SYNC vs BACKGROUND delegation:
   - For a quick, single job, call the delegation tool directly and use its

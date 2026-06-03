@@ -35,6 +35,7 @@ HELP_TEXT = (
     "`!checkpoint` (or `!summarize`) — summarize this thread to long-term "
     "memory and reset the live context\n"
     "`!remember <text>` — store a durable preference/instruction\n"
+    "`!gpu <user@ip>` — attach a fresh GPU box (bare Ubuntu) and provision it\n"
     "`!runs` — list experiments and their status\n"
     "`!approve <id>` — approve and launch a pending experiment\n"
     "`!cancel <id>` — cancel a running experiment\n"
@@ -147,9 +148,10 @@ class ResearchBot(discord.Client):
                 run_loop(self.memory, self.llm)
             )
 
-        # The experiment runner needs the registry (episodic store), so it's
-        # only available when memory is configured.
-        if settings.compute_enabled and self.memory is not None:
+        # The experiment runner needs the registry (episodic store). The GPU box
+        # is attached at runtime (`!gpu`, ephemeral per experiment), so the runner
+        # is built whenever memory is configured — not gated on a preset host.
+        if self.memory is not None:
             from ..experiments.runner import ExperimentRunner
             from ..experiments.ssh_docker import SSHDockerBackend
             from ..experiments.workspace import Workspace
@@ -383,6 +385,8 @@ class ResearchBot(discord.Client):
                 await message.channel.send("Memory isn't configured, so I can't store that.")
         elif cmd in {"runs", "approve", "cancel"}:
             await self._handle_experiment_command(message, cmd, arg.strip())
+        elif cmd == "gpu":
+            await self._attach_gpu(message, arg.strip())
         elif cmd == "getfile":
             await self._send_file(message, arg.strip())
         elif cmd == "ideate":
@@ -490,6 +494,40 @@ class ResearchBot(discord.Client):
             await message.channel.send("File is too large to upload (>8 MB).")
             return
         await message.channel.send(file=discord.File(str(target)))
+
+    async def _attach_gpu(self, message, arg) -> None:
+        """Attach a fresh GPU box (`!gpu user@ip`) and provision it in the background."""
+        if self.experiments is None:
+            await message.channel.send(
+                "Experiment runner isn't configured (needs a database)."
+            )
+            return
+        if not arg:
+            await message.channel.send("Usage: `!gpu <user@ip>` (bare Ubuntu, your SSH key).")
+            return
+
+        msg = await self.experiments.set_compute(arg)
+        await message.channel.send(
+            f"{msg}\nProvisioning (Docker + NVIDIA toolkit + MLflow) — I'll report back."
+        )
+
+        async def _provision_and_report() -> None:
+            try:
+                report = await self.experiments.provision()
+                survey = await self.experiments.survey()
+            except Exception as exc:  # noqa: BLE001
+                await self._notify_channel(
+                    str(message.channel.id),
+                    f"GPU provisioning failed: {exc}",
+                )
+                return
+            tail = "\n".join(report.splitlines()[-15:])
+            await self._notify_channel(
+                str(message.channel.id),
+                f"✅ GPU box ready.\n```\n{survey}\n```\n_provision log (tail):_\n```\n{tail}\n```",
+            )
+
+        self._spawn_background(_provision_and_report(), "gpu.provision")
 
     async def _handle_experiment_command(self, message, cmd, arg) -> None:
         if self.experiments is None:
