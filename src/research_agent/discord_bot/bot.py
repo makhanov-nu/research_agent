@@ -43,6 +43,7 @@ HELP_TEXT = (
     "`!ideate <topic>` — open a multi-model consortium session (panel searches "
     "lit+web, proposes); reply with feedback to run more rounds, `!ideate done` "
     "to finalize, `!ideate cancel` to drop it\n"
+    "`!project` — show this chat's project + artifacts (`!project name <x>` to rename)\n"
     "`!tasks` — recent subagent tasks (the dashboard)\n"
     "`!task <id>` — a task's status + result\n"
     "`!trace <id>` — export a task's full trace (reasoning + tool calls) as a file\n"
@@ -130,6 +131,7 @@ class ResearchBot(discord.Client):
         self.experiments = None
         self.consortium = None
         self.consortium_sessions: dict = {}  # channel_id -> ConsortiumSession
+        self.projects = None
         self.tasks = None
         self.dispatcher = None
         self.llm = None
@@ -166,6 +168,14 @@ class ResearchBot(discord.Client):
                 settings.experiment_artifacts_dir,
             )
             self._poller_task = self.loop.create_task(self._run_job_poller())
+
+        # Project store (each chat is a project): folders + DB registry.
+        from ..projects import ProjectStore
+
+        self.projects = ProjectStore(self._pool, settings.output_dir)
+        await self.projects.setup()
+        if self.experiments is not None:
+            self.experiments.projects = self.projects
 
         # Task dashboard (cross-subagent registry); needs the DB pool.
         if self._pool is not None:
@@ -207,7 +217,7 @@ class ResearchBot(discord.Client):
         self.graph = await build_graph(
             checkpointer, self.memory, self.experiments,
             mcp_tools=mcp_tools, consortium=self.consortium, task_store=self.tasks,
-            dispatcher=self.dispatcher,
+            dispatcher=self.dispatcher, projects=self.projects,
         )
         logger.info(
             "Research agent ready (memory=%s, experiments=%s, consortium=%s).",
@@ -403,8 +413,33 @@ class ResearchBot(discord.Client):
             await self._ideate(message, arg.strip())
         elif cmd in {"tasks", "task", "trace"}:
             await self._handle_task_command(message, cmd, arg.strip())
+        elif cmd == "project":
+            await self._handle_project_command(message, arg.strip())
         else:
             await message.channel.send(f"Unknown command `!{cmd}`.\n\n{HELP_TEXT}")
+
+    async def _handle_project_command(self, message, arg) -> None:
+        """`!project` shows this chat's project; `!project name <x>` renames it."""
+        if self.projects is None:
+            await message.channel.send("Projects aren't configured (needs the DB).")
+            return
+        channel_id = str(message.channel.id)
+        if arg.lower().startswith("name "):
+            new_name = arg[5:].strip()
+            proj = await self.projects.rename(channel_id, new_name)
+            await message.channel.send(f"Project renamed to **{proj['name']}** (`{proj['slug']}`).")
+            return
+        proj = await self.projects.ensure(channel_id)
+        arts = await self.projects.list_artifacts(proj["id"]) if proj.get("id") else []
+        by_kind: dict[str, int] = {}
+        for a in arts:
+            by_kind[a["kind"]] = by_kind.get(a["kind"], 0) + 1
+        summary = ", ".join(f"{k}: {v}" for k, v in by_kind.items()) or "no artifacts yet"
+        await message.channel.send(
+            f"**Project:** {proj['name']} (`{proj['slug']}`)\n"
+            f"Artifacts — {summary}\n"
+            f"Folder: `outputs/projects/{proj['slug']}/`  ·  rename with `!project name <x>`"
+        )
 
     async def _handle_task_command(self, message, cmd, arg) -> None:
         if self.tasks is None:
@@ -547,14 +582,29 @@ class ResearchBot(discord.Client):
             return
         self.consortium_sessions.pop(str(message.channel.id), None)
 
+        # Save the validated proposal into the project's council folder.
+        council_rel = ""
+        if self.projects is not None:
+            from ..projects import save_council_proposal
+
+            project = await self.projects.ensure(str(message.channel.id))
+            council_rel = await save_council_proposal(
+                self.projects, project, session.topic, result["ideas"]
+            )
+
         for chunk in _chunk(result["ideas"]):
             await message.channel.send(chunk)
-        await message.channel.send(
-            f"Converged after {result['rounds']} round(s). Full transcript: "
-            f"`!getfile {result['rel_path']}`\n"
+        tail = (
+            f"Converged after {result['rounds']} round(s). "
+            f"Full transcript: `!getfile {result['rel_path']}`\n"
+        )
+        if council_rel:
+            tail += f"Validated proposal saved for methodology: `!getfile {council_rel}`\n"
+        tail += (
             "Want me to hand this to the methodology writer for a detailed spec? "
             "Just say the word."
         )
+        await message.channel.send(tail)
 
     async def _send_file(self, message, relpath: str) -> None:
         if not relpath:

@@ -48,7 +48,8 @@ class MethodologyWriter(LatexWriter):
     subdir = "methodology"
 
     async def draft(
-        self, idea: str, constraints: str = "", venue: str = "", save_name: str = ""
+        self, idea: str, constraints: str = "", venue: str = "", save_name: str = "",
+        dirpath=None,
     ) -> dict:
         task = f"Research idea / problem:\n{idea}"
         if constraints:
@@ -56,4 +57,6 @@ class MethodologyWriter(LatexWriter):
         if venue:
             task += f"\nTarget venue/style: {venue}"
         task += "\n\nDesign the methodology and write the Methodology section now."
-        return await self._draft(task, slug_source=idea, save_name=save_name)
+        return await self._draft(
+            task, slug_source=idea, save_name=save_name, dirpath=dirpath
+        )

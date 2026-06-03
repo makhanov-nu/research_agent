@@ -1,4 +1,10 @@
-"""Agent tools for writing research artifacts (review, methodology, paper)."""
+"""Agent tools for writing research artifacts (review, methodology, paper).
+
+Each artifact is saved into the current project's folder
+(`outputs/projects/<slug>/<kind>/`) and registered in the project's artifact
+table, so the web frontend can list and read it. The paper writer gathers the
+project's existing lit review + methodology (+ experiment results) as material.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +13,9 @@ from pathlib import Path
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 
+from ..config import settings
+from ..projects import resolve_project
+
 
 def _channel(config: RunnableConfig | None) -> str | None:
     if not config:
@@ -14,39 +23,75 @@ def _channel(config: RunnableConfig | None) -> str | None:
     return (config.get("configurable") or {}).get("thread_id")
 
 
-async def _record(
-    task_store, agent: str, input_text: str, config, coro, subdir: str
-) -> str:
-    """Run a writer coroutine, persist the task + artifact, return a summary."""
-    task_id = None
-    if task_store is not None:
-        task_id = await task_store.create(agent, input_text, _channel(config))
-        await task_store.mark_running(task_id)
+def _rel_to_outputs(path: str) -> str:
+    """Path relative to the outputs dir (what `!getfile` expects)."""
     try:
-        result = await coro
-    except Exception as exc:  # noqa: BLE001 — report failure up, record it
-        if task_store is not None:
-            await task_store.fail(task_id, str(exc), [])
-        return f"[{agent} could not complete: {exc}]"
+        return str(Path(path).resolve().relative_to(Path(settings.output_dir).resolve()))
+    except ValueError:
+        return Path(path).name
 
-    tex = Path(result["tex_path"]).name
-    summary = (
-        f"Wrote a LaTeX {agent.replace('_', ' ')} with {result['n_refs']} references.\n"
-        f"Saved: `{tex}`"
-        + (f" (+ `{Path(result['bib_path']).name}`)" if result["bib_path"] else "")
-        + f"\nRetrieve it with `!getfile {subdir}/{tex}`."
-    )
-    if task_store is not None:
-        await task_store.finish(
-            task_id, summary,
-            [{"type": "artifact", "tex": result["tex_path"],
-              "bib": result["bib_path"], "n_refs": result["n_refs"]}],
+
+async def _gather_material(projects, project, limit: int = 6000) -> str:
+    """Read the project's lit review + methodology as material for the paper."""
+    if projects is None or project is None or project.get("id") is None:
+        return ""
+    chunks: list[str] = []
+    for kind, label in (("lit_review", "Related Work"), ("methodology", "Methodology")):
+        rows = await projects.list_artifacts(project["id"], kind)
+        if not rows:
+            continue
+        path = Path(settings.output_dir) / rows[0]["rel_path"]
+        if path.exists():
+            chunks.append(f"=== {label} (from project) ===\n{path.read_text()[:limit]}")
+    # Experiment results, if any.
+    exp_rows = await projects.list_artifacts(project["id"], "experiments")
+    if exp_rows:
+        notes = "\n".join(
+            f"- {r['title']}: {r.get('meta', {})}" for r in exp_rows[:10]
         )
-    return summary
+        chunks.append(f"=== Experiment results (from project) ===\n{notes}")
+    return "\n\n".join(chunks)
 
 
-def build_writing_tools(writers, task_store=None) -> list[BaseTool]:
-    """Return writing tools bound to a `Writers` bundle."""
+def build_writing_tools(writers, task_store=None, projects=None) -> list[BaseTool]:
+    """Return writing tools bound to a `Writers` bundle and the project store."""
+
+    async def _run(agent: str, kind: str, input_text: str, draft_coro_fn, config) -> str:
+        project = await resolve_project(projects, config)
+        dirpath = None
+        if projects is not None and project is not None:
+            dirpath = projects.kind_dir(project["slug"], kind)
+
+        task_id = None
+        if task_store is not None:
+            task_id = await task_store.create(agent, input_text, _channel(config))
+            await task_store.mark_running(task_id)
+        try:
+            result = await draft_coro_fn(dirpath)
+        except Exception as exc:  # noqa: BLE001
+            if task_store is not None:
+                await task_store.fail(task_id, str(exc), [])
+            return f"[{agent} could not complete: {exc}]"
+
+        rel = _rel_to_outputs(result["tex_path"])
+        if projects is not None and project is not None and project.get("id"):
+            await projects.add_artifact(
+                project["id"], kind, Path(result["tex_path"]).stem, rel,
+                {"n_refs": result["n_refs"], "bib": _rel_to_outputs(result["bib_path"]) if result["bib_path"] else ""},
+            )
+        summary = (
+            f"Wrote a LaTeX {agent.replace('_', ' ')} with {result['n_refs']} "
+            f"references"
+            + (f" (project: {project['name']})" if project else "")
+            + f".\nSaved: `{Path(result['tex_path']).name}` — retrieve with `!getfile {rel}`."
+        )
+        if task_store is not None:
+            await task_store.finish(
+                task_id, summary,
+                [{"type": "artifact", "tex": result["tex_path"],
+                  "bib": result["bib_path"], "n_refs": result["n_refs"]}],
+            )
+        return summary
 
     @tool
     async def draft_literature_review(
@@ -55,20 +100,21 @@ def build_writing_tools(writers, task_store=None) -> list[BaseTool]:
     ) -> str:
         """Research the literature on a topic and write a LaTeX Related Work section.
 
-        Gathers and reads related papers, then writes a thematically-organized
-        LaTeX literature review with \\cite keys plus a matching BibTeX file, and
-        saves both to disk.
+        Saves the thematically-organized review (with \\cite keys) + a BibTeX file
+        into the project's lit_review folder.
 
         Args:
-            topic: The subject of the review (e.g. "speculative decoding for LLMs").
-            focus: Optional angle to emphasize (e.g. "training-free methods").
-            venue: Optional target venue/style (e.g. "NeurIPS", "Nature Methods").
+            topic: The subject of the review.
+            focus: Optional angle to emphasize.
+            venue: Optional target venue/style.
             save_name: Optional base filename; defaults to a slug of the topic.
         """
-        return await _record(
-            task_store, "literature_review", topic, config,
-            writers.reviewer.draft(topic, focus=focus, venue=venue, save_name=save_name),
-            "lit_reviews",
+        return await _run(
+            "literature_review", "lit_review", topic,
+            lambda d: writers.reviewer.draft(
+                topic, focus=focus, venue=venue, save_name=save_name, dirpath=d
+            ),
+            config,
         )
 
     @tool
@@ -78,24 +124,21 @@ def build_writing_tools(writers, task_store=None) -> list[BaseTool]:
     ) -> str:
         """Design a rigorous methodology for a research idea and write it in LaTeX.
 
-        Produces a LaTeX \\section{Methodology} covering research questions,
-        approach, data/models, experimental design, baselines/ablations, metrics
-        and protocol, reproducibility, and threats to validity — grounded in the
-        literature (standard baselines/datasets/metrics) and cited. Saves the
-        .tex (+ .bib) to disk.
+        Saves a LaTeX \\section{Methodology} (+ BibTeX) into the project's
+        methodology folder, grounded in the literature and cited.
 
         Args:
-            idea: The research idea, question, or contribution to design around.
+            idea: The research idea/contribution to design around.
             constraints: Optional resources/limits (compute, data, time, models).
             venue: Optional target venue/style.
             save_name: Optional base filename; defaults to a slug of the idea.
         """
-        return await _record(
-            task_store, "methodology", idea, config,
-            writers.methodologist.draft(
-                idea, constraints=constraints, venue=venue, save_name=save_name
+        return await _run(
+            "methodology", "methodology", idea,
+            lambda d: writers.methodologist.draft(
+                idea, constraints=constraints, venue=venue, save_name=save_name, dirpath=d
             ),
-            "methodology",
+            config,
         )
 
     @tool
@@ -103,29 +146,28 @@ def build_writing_tools(writers, task_store=None) -> list[BaseTool]:
         brief: str, material: str = "", sections: str = "", venue: str = "",
         save_name: str = "", config: RunnableConfig = None,
     ) -> str:
-        """Draft a research paper (or specific sections) in LaTeX from given material.
+        """Draft a research paper (or sections) in LaTeX from the project's material.
 
-        Composes submission-style LaTeX prose, weaving together the supplied
-        contribution, methodology, related work, and findings. Does not fabricate
-        results or citations; inserts clearly-marked TODOs for gaps. Saves the
-        .tex (+ .bib) to disk.
+        If `material` is empty, the project's existing lit review, methodology, and
+        experiment results are gathered automatically. Saves into the project's
+        paper folder; inserts TODOs rather than fabricating results/citations.
 
         Args:
             brief: What to write and the framing (the contribution/story).
-            material: Supporting content to use (methodology, findings, related
-                work) — paste what you already have so it isn't re-derived.
-            sections: Optional specific sections to write (e.g. "Intro, Method");
-                omit for a full draft.
+            material: Extra material to use; leave empty to auto-gather from the project.
+            sections: Optional specific sections (e.g. "Intro, Method"); omit for full draft.
             venue: Optional target venue/style.
             save_name: Optional base filename; defaults to a slug of the brief.
         """
-        return await _record(
-            task_store, "paper_draft", brief, config,
-            writers.paper_writer.draft(
-                brief, material=material, sections=sections, venue=venue,
-                save_name=save_name,
+        project = await resolve_project(projects, config)
+        gathered = material or await _gather_material(projects, project)
+        return await _run(
+            "paper_draft", "paper", brief,
+            lambda d: writers.paper_writer.draft(
+                brief, material=gathered, sections=sections, venue=venue,
+                save_name=save_name, dirpath=d,
             ),
-            "papers",
+            config,
         )
 
     return [draft_literature_review, design_methodology, draft_paper]

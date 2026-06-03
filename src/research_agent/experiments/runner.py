@@ -72,11 +72,12 @@ def read_latest_metrics(artifact_dir: str) -> dict:
 
 
 class ExperimentRunner:
-    def __init__(self, episodic, backend, workspace, artifacts_dir: str):
+    def __init__(self, episodic, backend, workspace, artifacts_dir: str, projects=None):
         self.episodic = episodic
         self.backend = backend
         self.workspace = workspace
         self.artifacts_dir = artifacts_dir
+        self.projects = projects
 
     @property
     def enabled(self) -> bool:
@@ -339,6 +340,7 @@ class ExperimentRunner:
         await self.episodic.update_experiment(
             exp_id, status=status.state.value, metrics=metrics, artifacts=artifacts,
         )
+        await self._record_to_project(exp, dest, status.state.value, metrics, cfg)
         msg = (
             f"Experiment #{exp_id} ({exp['title']}) {status.state.value}."
             + (f" metrics: {metrics}" if metrics else "")
@@ -348,9 +350,58 @@ class ExperimentRunner:
             title=exp["title"], state=status.state.value, message=msg,
         )
 
+    async def _record_to_project(self, exp, dest, state, metrics, cfg) -> None:
+        """Assemble the experiment folder under the project and register it.
+
+        Copies the source code (workspace) + fetched results into
+        outputs/projects/<slug>/experiments/exp_<id>/ with a metadata.json
+        (status, metrics, image, command, compute host, MLflow run).
+        """
+        if self.projects is None:
+            return
+        try:
+            project = await self.projects.ensure(exp.get("channel_id"))
+            if project.get("id") is None:
+                return
+            exp_id = exp["id"]
+            base = self.projects.kind_dir(project["slug"], "experiments") / f"exp_{exp_id}"
+            (base / "code").mkdir(parents=True, exist_ok=True)
+            (base / "results").mkdir(parents=True, exist_ok=True)
+            _copy_tree(self.workspace.path_for(exp_id), base / "code")
+            _copy_tree(Path(dest), base / "results")
+            meta = {
+                "experiment_id": exp_id, "title": exp.get("title"), "status": state,
+                "metrics": metrics, "image": cfg.get("image"),
+                "command": cfg.get("command"), "compute": cfg.get("compute", {}).get("host"),
+                "mlflow_run": f"exp_{exp_id}",
+            }
+            (base / "metadata.json").write_text(json.dumps(meta, indent=2, default=str))
+            rel = f"projects/{project['slug']}/experiments/exp_{exp_id}"
+            await self.projects.add_artifact(
+                project["id"], "experiments", exp.get("title") or f"exp_{exp_id}",
+                rel, {"status": state, "metrics": metrics},
+            )
+        except Exception:  # noqa: BLE001 — recording must not break the poller
+            logger.exception("Failed to record experiment %s to project", exp.get("id"))
+
 
 def _list_artifacts(dest: str) -> list[str]:
     root = Path(dest)
     if not root.exists():
         return []
     return sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
+
+
+def _copy_tree(src, dst) -> None:
+    """Copy a directory's files into dst (best-effort; skips if src missing)."""
+    import shutil
+
+    src, dst = Path(src), Path(dst)
+    if not src.exists():
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    for p in src.rglob("*"):
+        if p.is_file():
+            target = dst / p.relative_to(src)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(p, target)

@@ -97,11 +97,14 @@ class LatexWriter:
         )
         return flatten_content(result["messages"][-1].content)
 
-    async def _draft(self, task: str, slug_source: str, save_name: str = "") -> dict:
+    async def _draft(
+        self, task: str, slug_source: str, save_name: str = "", dirpath=None
+    ) -> dict:
         text = await self._generate(task)
         latex, bibtex, n_refs = parse_latex_artifact(text)
         name = timestamped(slugify(save_name or slug_source))
-        tex_path, bib_path = self.save(name, latex, bibtex)
+        directory = Path(dirpath) if dirpath else self.dir
+        tex_path, bib_path = write_tex_bib(directory, name, latex, bibtex)
         logger.info("Wrote %s %s (%d refs)", self.subdir, tex_path, n_refs)
         return {
             "tex_path": tex_path,
