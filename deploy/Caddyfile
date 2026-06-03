@@ -11,6 +11,12 @@ airesearchagent.uk {
 	reverse_proxy 127.0.0.1:8800
 }
 
+# www → apex
+www.airesearchagent.uk {
+	tls /etc/caddy/origin.pem /etc/caddy/origin.key
+	redir https://airesearchagent.uk{uri}
+}
+
 # === Cloudflare "Flexible" (no origin cert; CF→origin is plain HTTP) ===
 # Comment out the block above and use this instead. Caddy serves plain HTTP/80.
 # http://airesearchagent.uk {
