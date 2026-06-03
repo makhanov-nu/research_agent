@@ -17,8 +17,10 @@ from langchain_core.tools import BaseTool, tool
 
 logger = logging.getLogger(__name__)
 
-# A runner maps a task string -> (result, trace).
-Runner = Callable[[str], Awaitable[tuple[str, list]]]
+# The dispatcher is GLOBAL (one pool across all projects), so a runner is given
+# the originating channel and routes its output into THAT channel's project.
+# A runner maps (task, channel_id) -> (result, trace).
+Runner = Callable[[str, "str | None"], Awaitable[tuple[str, list]]]
 # Fired when a task reaches a terminal state. This is a pure TRIGGER: it carries
 # only the task id, agent, status, and channel — NOT the result. The result and
 # error already live in the task dashboard; the handler reads them back from
@@ -26,33 +28,75 @@ Runner = Callable[[str], Awaitable[tuple[str, list]]]
 OnComplete = Callable[[int, str, str, "str | None"], Awaitable[None]]
 
 
-def build_runners(*, model, mcp_tools, writers, consortium) -> dict[str, Runner]:
-    """Assemble the dispatchable subagent runners from available resources."""
+def build_runners(*, model, mcp_tools, writers, consortium, projects=None) -> dict[str, Runner]:
+    """Assemble the dispatchable subagent runners from available resources.
+
+    Runners are project-aware: each resolves the project from the originating
+    channel and saves its artifact into that project's folder (registering it),
+    so several projects can run agents concurrently without colliding.
+    """
     from .literature import build_literature_runner
 
     runners: dict[str, Runner] = {}
 
     if mcp_tools:
-        runners["research_literature"] = build_literature_runner(model, mcp_tools)
+        lit = build_literature_runner(model, mcp_tools)
 
-    def _artifact_runner(writer, label):
-        async def _run(task: str) -> tuple[str, list]:
-            r = await writer.draft(task)
-            summary = f"Wrote a LaTeX {label} with {r['n_refs']} references: {r['tex_path']}"
-            return summary, [
-                {"type": "artifact", "tex": r["tex_path"], "bib": r["bib_path"]}
-            ]
+        async def _literature(task: str, channel_id: str | None) -> tuple[str, list]:
+            return await lit(task)  # research only; produces no saved artifact
+
+        runners["research_literature"] = _literature
+
+    def _rel(path: str) -> str:
+        from pathlib import Path
+
+        from ..config import settings
+
+        try:
+            return str(Path(path).resolve().relative_to(Path(settings.output_dir).resolve()))
+        except ValueError:
+            return Path(path).name
+
+    def _artifact_runner(writer, label, kind):
+        async def _run(task: str, channel_id: str | None) -> tuple[str, list]:
+            project = await projects.ensure(channel_id) if projects is not None else None
+            dirpath = None
+            if projects is not None and project is not None:
+                dirpath = projects.kind_dir(project["slug"], kind)
+            r = await writer.draft(task, dirpath=dirpath)
+            rel = _rel(r["tex_path"])
+            tag = f" (project: {project['name']})" if project else ""
+            if projects is not None and project is not None and project.get("id"):
+                from pathlib import Path
+
+                await projects.add_artifact(
+                    project["id"], kind, Path(r["tex_path"]).stem, rel,
+                    {"n_refs": r["n_refs"]},
+                )
+            summary = (
+                f"Wrote a LaTeX {label} with {r['n_refs']} references{tag}: "
+                f"`!getfile {rel}`"
+            )
+            return summary, [{"type": "artifact", "tex": r["tex_path"], "bib": r["bib_path"]}]
 
         return _run
 
-    runners["literature_review"] = _artifact_runner(writers.reviewer, "literature review")
-    runners["methodology"] = _artifact_runner(writers.methodologist, "methodology")
-    runners["paper_draft"] = _artifact_runner(writers.paper_writer, "paper draft")
+    runners["literature_review"] = _artifact_runner(writers.reviewer, "literature review", "lit_review")
+    runners["methodology"] = _artifact_runner(writers.methodologist, "methodology", "methodology")
+    runners["paper_draft"] = _artifact_runner(writers.paper_writer, "paper draft", "paper")
 
     if consortium is not None:
-        async def _consortium(task: str) -> tuple[str, list]:
+        async def _consortium(task: str, channel_id: str | None) -> tuple[str, list]:
+            from ..projects import save_council_proposal
+
             r = await consortium.ideate(task)
-            return r["ideas"], [{"type": "transcript", "path": r["rel_path"]}]
+            extra = []
+            if projects is not None:
+                project = await projects.ensure(channel_id)
+                council_rel = await save_council_proposal(projects, project, task, r["ideas"])
+                if council_rel:
+                    extra = [{"type": "council", "path": council_rel}]
+            return r["ideas"], [{"type": "transcript", "path": r["rel_path"]}, *extra]
 
         runners["consortium"] = _consortium
 
@@ -87,7 +131,7 @@ class TaskDispatcher:
         async with self._sem:
             await self.task_store.mark_running(task_id)
             try:
-                result, trace = await self._runners[agent](task)
+                result, trace = await self._runners[agent](task, channel_id)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Dispatched task %s (%s) failed", task_id, agent)
                 # Record the failure to the dashboard, THEN trigger the handler.

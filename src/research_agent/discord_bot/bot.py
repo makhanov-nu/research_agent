@@ -207,7 +207,7 @@ class ResearchBot(discord.Client):
             writers = build_writers(get_llm(), mcp_tools, settings.output_dir)
             runners = build_runners(
                 model=get_llm(), mcp_tools=mcp_tools, writers=writers,
-                consortium=self.consortium,
+                consortium=self.consortium, projects=self.projects,
             )
             self.dispatcher = TaskDispatcher(
                 runners, self.tasks, self._on_task_complete,
@@ -295,8 +295,14 @@ class ResearchBot(discord.Client):
             payload = f"The task failed: {row.get('error') or 'unknown error'}"
         else:
             payload = row.get("result") or "(the task recorded no result)"
+        # Tag the project so concurrent projects' completions are unambiguous.
+        proj_tag = ""
+        if self.projects is not None:
+            proj = await self.projects.get_by_channel(str(channel_id))
+            if proj:
+                proj_tag = f" [project: {proj['name']} #{proj['id']}]"
         event = (
-            f"[BACKGROUND TASK COMPLETE] #{task_id} ({agent}) — {status}.\n\n"
+            f"[BACKGROUND TASK COMPLETE] #{task_id} ({agent}){proj_tag} — {status}.\n\n"
             f"{payload}\n\n"
             "This is an automated event (not from the researcher). Incorporate "
             "this result with the ongoing work, reply with what matters, and "

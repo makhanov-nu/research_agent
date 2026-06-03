@@ -46,7 +46,7 @@ def _dispatcher(runners, events):
 
 
 async def test_dispatch_runs_in_background_and_pushes_event():
-    async def good_runner(task):
+    async def good_runner(task, channel_id=None):
         return f"done: {task}", [{"type": "ai", "content": task}]
 
     events = []
@@ -64,7 +64,7 @@ async def test_dispatch_runs_in_background_and_pushes_event():
 
 
 async def test_dispatch_failure_is_recorded_and_pushed():
-    async def bad_runner(task):
+    async def bad_runner(task, channel_id=None):
         raise RuntimeError("boom")
 
     events = []
@@ -87,7 +87,7 @@ async def test_concurrency_capped_by_semaphore():
     active = 0
     peak = 0
 
-    async def slow_runner(task):
+    async def slow_runner(task, channel_id=None):
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
@@ -103,8 +103,34 @@ async def test_concurrency_capped_by_semaphore():
     assert peak <= 2
 
 
+async def test_build_runners_route_artifacts_into_project(tmp_path):
+    """A dispatched artifact run saves into the originating channel's project."""
+    from research_agent.agents.dispatcher import build_runners
+    from research_agent.projects.store import ProjectStore
+
+    class _FakeWriter:
+        async def draft(self, task, dirpath=None):
+            p = dirpath / "out.tex"
+            p.write_text("\\section{X}")
+            return {"tex_path": str(p), "bib_path": "", "n_refs": 0, "latex": ""}
+
+    class _Writers:
+        reviewer = _FakeWriter()
+        methodologist = _FakeWriter()
+        paper_writer = _FakeWriter()
+
+    projects = ProjectStore(pool=None, output_dir=str(tmp_path))
+    runners = build_runners(
+        model=None, mcp_tools=[], writers=_Writers(), consortium=None, projects=projects,
+    )
+    summary, trace = await runners["literature_review"]("a topic", "chan-9")
+    saved = list((tmp_path / "projects").rglob("lit_review/out.tex"))
+    assert saved, "artifact not saved into a project folder"
+    assert "project" in summary
+
+
 async def test_dispatch_tool_is_the_only_tool_and_submits():
-    async def good_runner(task):
+    async def good_runner(task, channel_id=None):
         return "the answer", []
 
     events = []

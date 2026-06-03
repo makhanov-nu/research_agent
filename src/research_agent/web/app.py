@@ -135,15 +135,28 @@ def create_app():
             return PlainTextResponse(target.read_text(errors="replace"))
         return FileResponse(target, filename=target.name)
 
+    async def _attach_projects(rows: list[dict]) -> list[dict]:
+        """Annotate task rows with their project (name/id) by channel."""
+        cache: dict[str, dict | None] = {}
+        for r in rows:
+            chan = r.get("channel_id")
+            if chan and chan not in cache:
+                cache[chan] = await app.state.projects.get_by_channel(chan)
+            proj = cache.get(chan)
+            r["project_id"] = proj["id"] if proj else None
+            r["project_name"] = proj["name"] if proj else None
+        return rows
+
     @app.get("/api/tasks")
     async def list_tasks(limit: int = 30, user: dict = Depends(auth.require_user)):
-        return await app.state.tasks.list_recent(limit=limit)
+        return await _attach_projects(await app.state.tasks.list_recent(limit=limit))
 
     @app.get("/api/tasks/{task_id}")
     async def task_detail(task_id: int, user: dict = Depends(auth.require_user)):
         row = await app.state.tasks.get(task_id)
         if row is None:
             raise HTTPException(404, "task not found")
+        (await _attach_projects([row]))
         return row
 
     @app.get("/api/tasks/stream")

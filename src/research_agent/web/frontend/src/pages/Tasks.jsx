@@ -46,12 +46,13 @@ export default function Tasks() {
       </h2>
       <table className="tasks">
         <thead>
-          <tr><th>#</th><th>Agent</th><th>Status</th><th>Input</th><th>When</th></tr>
+          <tr><th>#</th><th>Project</th><th>Agent</th><th>Status</th><th>Input</th><th>When</th></tr>
         </thead>
         <tbody>
           {tasks.map((t) => (
             <tr key={t.id} onClick={() => open(t.id)} className="clickable">
               <td>{t.id}</td>
+              <td className="muted">{t.project_name || "—"}</td>
               <td className="mono">{t.agent}</td>
               <td><span className={`badge ${STATUS_CLASS[t.status] || ""}`}>{t.status}</span></td>
               <td className="truncate">{t.input}</td>
@@ -59,7 +60,7 @@ export default function Tasks() {
             </tr>
           ))}
           {tasks.length === 0 && (
-            <tr><td colSpan="5" className="muted">No tasks yet.</td></tr>
+            <tr><td colSpan="6" className="muted">No tasks yet.</td></tr>
           )}
         </tbody>
       </table>

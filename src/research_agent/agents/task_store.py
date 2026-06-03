@@ -103,12 +103,12 @@ class TaskStore:
         async with self.pool.connection() as conn:
             if channel_id is None:
                 cur = await conn.execute(
-                    "SELECT id, agent, status, input, created_at FROM tasks "
+                    "SELECT id, agent, status, input, channel_id, created_at FROM tasks "
                     "ORDER BY created_at DESC LIMIT %s", (limit,)
                 )
             else:
                 cur = await conn.execute(
-                    "SELECT id, agent, status, input, created_at FROM tasks "
+                    "SELECT id, agent, status, input, channel_id, created_at FROM tasks "
                     "WHERE channel_id=%s ORDER BY created_at DESC LIMIT %s",
                     (channel_id, limit),
                 )
