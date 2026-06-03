@@ -98,11 +98,13 @@ PHOENIX_ENABLED=true
 
 `setup_tracing()` (called from both entrypoints) auto-instruments
 LangChain/LangGraph via OpenInference, so every agent + graph run streams to your
-local Phoenix and is viewable there — a LangSmith-like UI you own.
+local Phoenix and is viewable there — a LangSmith-like UI you own. (No SaaS; the
+data never leaves your box.)
 
-`LANGSMITH_API_KEY` remains an optional **paid** hosted alternative (off unless
-set). Either way, the in-app task dashboard (`!trace <id>` and the web UI) still
-records each subagent's reasoning + tool calls in Postgres.
+The web frontend **embeds Phoenix** under a **Traces** tab: the app
+reverse-proxies it at `/phoenix` behind the same WorkOS auth, so port 6006 is
+never exposed publicly. The in-app task dashboard (`!trace <id>` and the web UI)
+also records each subagent's reasoning + tool calls in Postgres.
 
 ## Commands
 

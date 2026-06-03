@@ -30,6 +30,8 @@ services:
       - phoenixdata:/mnt/data
     environment:
       PHOENIX_WORKING_DIR: /mnt/data
+      # Serve under /phoenix so the web app can reverse-proxy + embed it.
+      PHOENIX_HOST_ROOT_PATH: /phoenix
 
 volumes:
   pgdata:

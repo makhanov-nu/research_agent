@@ -177,6 +177,47 @@ def create_app():
 
         return EventSourceResponse(gen())
 
+    # --- Phoenix trace UI, reverse-proxied behind auth ---
+    # Phoenix runs locally (PHOENIX_HOST_ROOT_PATH=/phoenix) and isn't exposed
+    # publicly; we proxy it under /phoenix so the frontend can embed it and it
+    # inherits the WorkOS session. Registered before the SPA catch-all.
+    _HOP_BY_HOP = {
+        "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+        "te", "trailers", "transfer-encoding", "upgrade", "content-encoding",
+        "content-length",
+    }
+
+    @app.api_route(
+        "/phoenix/{path:path}",
+        methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
+    )
+    async def phoenix_proxy(path: str, request: Request, user: dict = Depends(auth.require_user)):
+        import httpx
+        from fastapi.responses import Response
+
+        root = settings.phoenix_root_path.strip("/")
+        target = f"{settings.phoenix_internal_url.rstrip('/')}/{root}/{path}"
+        url = httpx.URL(target, query=request.url.query.encode("utf-8"))
+        fwd = {
+            k: v for k, v in request.headers.items()
+            if k.lower() not in _HOP_BY_HOP and k.lower() != "host"
+        }
+        body = await request.body()
+        try:
+            async with httpx.AsyncClient(timeout=60, follow_redirects=False) as client:
+                upstream = await client.request(
+                    request.method, url, headers=fwd, content=body
+                )
+        except httpx.HTTPError:
+            raise HTTPException(502, "Phoenix is not reachable (is it running?)")
+        out = {
+            k: v for k, v in upstream.headers.items()
+            if k.lower() not in _HOP_BY_HOP
+            # allow embedding the proxied UI in our SPA iframe
+            and k.lower() not in {"x-frame-options", "content-security-policy"}
+        }
+        return Response(content=upstream.content, status_code=upstream.status_code, headers=out)
+
     # --- SPA static (built React app), if present ---
 
     dist = Path(__file__).resolve().parent / "frontend" / "dist"

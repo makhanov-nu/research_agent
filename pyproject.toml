@@ -37,6 +37,7 @@ web = [
     "workos>=5",
     "itsdangerous>=2.2",
     "psycopg[binary,pool]>=3.1",
+    "httpx>=0.27",
 ]
 obs = [
     "arize-phoenix>=4",

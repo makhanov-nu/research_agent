@@ -138,18 +138,17 @@ class Settings(BaseSettings):
     # successfully-authenticated WorkOS user).
     web_allowed_emails: str = ""
 
-    # --- Observability ---
-    # Arize Phoenix: free, self-hosted, local trace UI (recommended). When
-    # enabled, agent/graph runs are auto-instrumented and streamed to a local
-    # Phoenix collector. `phoenix_endpoint` is the OTLP traces endpoint
+    # --- Observability: Arize Phoenix (free, self-hosted, local) ---
+    # When enabled, agent/graph runs are auto-instrumented and streamed to a
+    # local Phoenix collector. `phoenix_endpoint` is the OTLP traces endpoint
     # (e.g. http://localhost:6006/v1/traces); empty uses Phoenix's default.
     phoenix_enabled: bool = False
     phoenix_project: str = "research-agent"
     phoenix_endpoint: str = ""
-    # LangSmith: optional hosted alternative (paid). Off unless a key is set.
-    langsmith_api_key: str = ""
-    langsmith_project: str = "research-agent"
-    langsmith_endpoint: str = "https://api.smith.langchain.com"
+    # The web app reverse-proxies the Phoenix UI at this path (behind auth), so
+    # it's reachable through the frontend without exposing port 6006 publicly.
+    phoenix_internal_url: str = "http://localhost:6006"
+    phoenix_root_path: str = "/phoenix"
 
     @property
     def allowed_emails(self) -> list[str]:
@@ -205,26 +204,3 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-
-
-def _enable_langsmith() -> None:
-    """Turn on LangChain's native LangSmith tracing when a key is configured.
-
-    LangChain/LangGraph read these env vars at runtime, so every agent/graph run
-    is traced with no code changes. We only set what isn't already in the env.
-    """
-    import os
-
-    if not settings.langsmith_api_key:
-        return
-    os.environ.setdefault("LANGSMITH_TRACING", "true")
-    os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
-    os.environ.setdefault("LANGSMITH_API_KEY", settings.langsmith_api_key)
-    os.environ.setdefault("LANGCHAIN_API_KEY", settings.langsmith_api_key)
-    os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith_project)
-    os.environ.setdefault("LANGCHAIN_PROJECT", settings.langsmith_project)
-    os.environ.setdefault("LANGSMITH_ENDPOINT", settings.langsmith_endpoint)
-    os.environ.setdefault("LANGCHAIN_ENDPOINT", settings.langsmith_endpoint)
-
-
-_enable_langsmith()

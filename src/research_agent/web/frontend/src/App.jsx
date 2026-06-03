@@ -4,6 +4,7 @@ import { api } from "./api.js";
 import Projects from "./pages/Projects.jsx";
 import ProjectDetail from "./pages/ProjectDetail.jsx";
 import Tasks from "./pages/Tasks.jsx";
+import Traces from "./pages/Traces.jsx";
 
 export default function App() {
   const [user, setUser] = useState(undefined); // undefined = loading
@@ -22,6 +23,7 @@ export default function App() {
         <nav>
           <Link to="/">Projects</Link>
           <Link to="/tasks">Tasks</Link>
+          <Link to="/traces">Traces</Link>
         </nav>
         <div className="user">
           {user.email} · <a href="/auth/logout">Sign out</a>
@@ -32,6 +34,7 @@ export default function App() {
           <Route path="/" element={<Projects />} />
           <Route path="/projects/:id" element={<ProjectDetail />} />
           <Route path="/tasks" element={<Tasks />} />
+          <Route path="/traces" element={<Traces />} />
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>
       </main>
