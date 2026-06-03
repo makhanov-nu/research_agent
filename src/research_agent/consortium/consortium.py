@@ -108,7 +108,7 @@ def _chair_prompt(topic: str) -> str:
 
 class Consortium:
     def __init__(self, lit_tools, panel_models, chair_model, output_dir,
-                 temperature: float = 0.6, rounds: int = 1):
+                 temperature: float = 0.6, rounds: int = 1, recall=None):
         # `lit_tools` is the shared MCP tool pool (paperclip + Tavily web search).
         self.tools = lit_tools or []
         self.panel = list(panel_models)
@@ -116,6 +116,9 @@ class Consortium:
         self.output_dir = Path(output_dir) / "ideas"
         self.temperature = temperature
         self.rounds = max(0, rounds)
+        # Optional async callable (query -> str) returning prior insights/lessons
+        # to seed the debate, so the panel builds on past sessions.
+        self.recall = recall
 
     def new_session(self, topic: str, focus: str = "") -> "ConsortiumSession":
         return ConsortiumSession(self, topic, focus)
@@ -186,8 +189,16 @@ class ConsortiumSession:
     async def run_round(self, feedback: str = "") -> str:
         """Run one debate round; return a digest of this round's responses."""
         self.round_no += 1
-        if self.round_no == 1 and self.focus:
-            self.transcript.append(("Focus", self.focus))
+        if self.round_no == 1:
+            if self.focus:
+                self.transcript.append(("Focus", self.focus))
+            if self.c.recall is not None:
+                try:
+                    prior = await self.c.recall(self.topic)
+                except Exception:  # noqa: BLE001
+                    prior = ""
+                if prior:
+                    self.transcript.append(("Prior insights (memory)", prior))
         if feedback:
             self.transcript.append(("Researcher (you)", feedback))
 

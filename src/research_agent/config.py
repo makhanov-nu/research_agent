@@ -138,6 +138,13 @@ class Settings(BaseSettings):
     # successfully-authenticated WorkOS user).
     web_allowed_emails: str = ""
 
+    # --- Observability (LangSmith tracing of agent runs) ---
+    # When an API key is set, LangChain/LangGraph runs are traced to LangSmith
+    # (full step-by-step agent traces, like the in-app task trace but richer).
+    langsmith_api_key: str = ""
+    langsmith_project: str = "research-agent"
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+
     @property
     def allowed_emails(self) -> list[str]:
         return [e.strip().lower() for e in self.web_allowed_emails.split(",") if e.strip()]
@@ -192,3 +199,26 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def _enable_langsmith() -> None:
+    """Turn on LangChain's native LangSmith tracing when a key is configured.
+
+    LangChain/LangGraph read these env vars at runtime, so every agent/graph run
+    is traced with no code changes. We only set what isn't already in the env.
+    """
+    import os
+
+    if not settings.langsmith_api_key:
+        return
+    os.environ.setdefault("LANGSMITH_TRACING", "true")
+    os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+    os.environ.setdefault("LANGSMITH_API_KEY", settings.langsmith_api_key)
+    os.environ.setdefault("LANGCHAIN_API_KEY", settings.langsmith_api_key)
+    os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith_project)
+    os.environ.setdefault("LANGCHAIN_PROJECT", settings.langsmith_project)
+    os.environ.setdefault("LANGSMITH_ENDPOINT", settings.langsmith_endpoint)
+    os.environ.setdefault("LANGCHAIN_ENDPOINT", settings.langsmith_endpoint)
+
+
+_enable_langsmith()

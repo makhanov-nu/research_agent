@@ -141,14 +141,40 @@ class SemanticMemory:
         except Exception:  # noqa: BLE001
             logger.exception("Semantic memory write failed.")
 
-    def recall(self, query: str, limit: int = 5) -> str:
-        """Return relevant facts as a citation-annotated block for the prompt."""
+    def add_fact(self, text: str, source: str | None = None,
+                 metadata: dict | None = None, infer: bool = False) -> None:
+        """Store a single fact/lesson VERBATIM (infer=False) with provenance.
+
+        Used for consolidated lessons/insights we don't want mem0 to re-extract
+        or paraphrase — e.g. an experiment failure lesson or a council insight.
+        """
+        if not self.enabled:
+            return
+        meta = {"as_of": datetime.now(timezone.utc).isoformat()}
+        if source:
+            meta["source"] = source
+        if metadata:
+            meta.update(metadata)
+        try:
+            self._mem.add(
+                text, user_id=settings.memory_user_id, metadata=meta, infer=infer
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Semantic fact write failed.")
+
+    def recall(self, query: str, limit: int = 5, only_type: str | None = None) -> str:
+        """Return relevant facts as a citation-annotated block for the prompt.
+
+        `only_type` keeps only results whose metadata `type` matches (e.g.
+        "lesson"); filtered client-side so it works across mem0 versions.
+        """
         if not self.enabled:
             return ""
         try:
             # mem0 2.x: scope by user via filters (top-level user_id is rejected).
             res = self._mem.search(
-                query, filters={"user_id": settings.memory_user_id}, limit=limit
+                query, filters={"user_id": settings.memory_user_id},
+                limit=limit * 3 if only_type else limit,
             )
         except Exception:  # noqa: BLE001
             logger.exception("Semantic memory search failed.")
@@ -157,12 +183,16 @@ class SemanticMemory:
         results = res.get("results", res) if isinstance(res, dict) else res
         lines = []
         for item in results or []:
-            text = item.get("memory") or item.get("text") or ""
             meta = item.get("metadata") or {}
+            if only_type and meta.get("type") != only_type:
+                continue
+            text = item.get("memory") or item.get("text") or ""
             src = meta.get("source")
             cite = f" [source: {src}]" if src else ""
             if text:
                 lines.append(f"- {text}{cite}")
+            if len(lines) >= limit:
+                break
         return "\n".join(lines)
 
 

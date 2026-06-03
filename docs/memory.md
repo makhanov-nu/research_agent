@@ -59,6 +59,38 @@ A background pass (`memory/maintenance.py`, every `MAINTENANCE_INTERVAL_SECONDS`
 - **Consolidation / reflection** — recent episodic activity is distilled into
   durable semantic insights.
 
+## Experience → lesson → reuse loop
+
+Specialized agents don't just produce artifacts — their **experience feeds back
+into memory** so future runs improve:
+
+```mermaid
+flowchart LR
+  EX["experiment / council run"] --> CAP["capture: log to episodic"]
+  CAP --> LES["consolidate: lesson → semantic (type=lesson)"]
+  LES --> REC["recall_lessons(task)"]
+  REC --> NEXT["inject into the next coder / council run"]
+  NEXT --> EX
+```
+
+- **Capture** — every experiment outcome and council session is logged to
+  episodic (`log_experience`).
+- **Consolidate** — on a **failed** experiment the runner fetches the container
+  logs and an LLM extracts a concise root-cause **lesson**; successes record what
+  worked. Council sessions store their validated proposal as a lesson. Lessons go
+  to semantic memory verbatim (`add_fact`, `infer=False`) tagged `type=lesson`.
+- **Reuse** — `MemoryManager.recall_lessons(task)` retrieves relevant lessons
+  (filtered to `type=lesson`) and **injects them into the Codex coder's prompt**
+  before it writes/relaunches an experiment; the consortium seeds round 1 with
+  the project's prior insights. So past mistakes actively shape future runs.
+
+## Observability (LangSmith)
+
+Set `LANGSMITH_API_KEY` to trace every agent/graph run to
+[LangSmith](https://smith.langchain.com) — full step-by-step tool/LLM traces.
+It's enabled at import time (no code changes). The in-app task dashboard
+(`!trace <id>` and the web UI) also records each subagent's reasoning + tool calls.
+
 ## Commands
 
 `!remember <text>` · `!checkpoint` (or `!summarize`) — see [Discord commands](commands.md).

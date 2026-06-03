@@ -166,6 +166,7 @@ class ResearchBot(discord.Client):
                 SSHDockerBackend(),
                 Workspace(settings.experiment_workspace_dir),
                 settings.experiment_artifacts_dir,
+                memory=self.memory,
             )
             self._poller_task = self.loop.create_task(self._run_job_poller())
 
@@ -196,6 +197,7 @@ class ResearchBot(discord.Client):
                 mcp_tools, settings.panel_models, settings.consortium_chair_model,
                 settings.output_dir, settings.consortium_temperature,
                 settings.consortium_rounds,
+                recall=self.memory.recall_lessons if self.memory else None,
             )
 
         # Background dispatcher for async/parallel subagent runs (needs the
@@ -596,6 +598,20 @@ class ResearchBot(discord.Client):
             project = await self.projects.ensure(str(message.channel.id))
             council_rel = await save_council_proposal(
                 self.projects, project, session.topic, result["ideas"]
+            )
+
+        # Capture the session as episodic experience + a durable council lesson,
+        # so future ideation builds on it (recall seeds round 1).
+        if self.memory is not None:
+            channel = str(message.channel.id)
+            await self.memory.log_experience(
+                "council_session",
+                f"Consortium on '{session.topic}' converged after {result['rounds']} round(s).",
+                channel, {"topic": session.topic, "rel_path": result["rel_path"]},
+            )
+            await self.memory.record_lesson(
+                f"[council:{session.topic}] {result['ideas'][:1500]}",
+                kind="council", channel_id=channel,
             )
 
         for chunk in _chunk(result["ideas"]):

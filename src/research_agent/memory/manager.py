@@ -44,6 +44,50 @@ class MemoryManager:
 
         return "\n\n".join(sections)
 
+    async def recall_lessons(self, query: str, limit: int = 5) -> str:
+        """Recall consolidated lessons relevant to a task (e.g. past failures)."""
+        if not (query and self.semantic.enabled):
+            return ""
+        return await asyncio.to_thread(
+            self.semantic.recall, query, limit, "lesson"
+        )
+
+    async def record_lesson(
+        self, text: str, *, kind: str, channel_id: str | None = None,
+        status: str | None = None, project: str | None = None,
+    ) -> None:
+        """Persist a durable lesson to episodic (action log) + semantic (mem0).
+
+        `kind` groups lessons (e.g. "experiment", "council"); the semantic copy is
+        tagged type=lesson so recall_lessons can retrieve it for future runs.
+        """
+        try:
+            await self.episodic.log_action(
+                f"lesson_{kind}", text[:280], channel_id=channel_id,
+                metadata={"status": status, "project": project},
+            )
+            if self.semantic.enabled:
+                meta = {"type": "lesson", "kind": kind}
+                if status:
+                    meta["status"] = status
+                if project:
+                    meta["project"] = project
+                await asyncio.to_thread(
+                    self.semantic.add_fact, text, f"lesson:{kind}", meta
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to record %s lesson", kind)
+
+    async def log_experience(
+        self, kind: str, summary: str, channel_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        """Log a notable subagent experience (council session, experiment outcome)."""
+        try:
+            await self.episodic.log_action(kind, summary[:500], channel_id, metadata)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to log experience %s", kind)
+
     async def remember(
         self, channel_id: str, user_text: str, agent_text: str,
         cumulative_tokens: int = 0, source: str | None = None,

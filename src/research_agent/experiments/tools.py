@@ -43,8 +43,18 @@ def build_experiment_tools(runner, coder=None) -> list[BaseTool]:
         """
         if coder is None:
             return "No coder model is configured (set OPENROUTER_API_KEY)."
+        # Inject lessons from past experiments (esp. failures on similar tasks).
+        prompt = spec
+        memory = getattr(runner, "memory", None)
+        if memory is not None:
+            lessons = await memory.recall_lessons(spec)
+            if lessons:
+                prompt = (
+                    f"{spec}\n\n=== Lessons from past experiments (avoid repeating "
+                    f"these mistakes) ===\n{lessons}"
+                )
         try:
-            files = await coder.author(spec)
+            files = await coder.author(prompt)
         except Exception as exc:  # noqa: BLE001
             return f"[coder failed to author the experiment: {exc}]"
         written = await runner.write_code(experiment_id, files)

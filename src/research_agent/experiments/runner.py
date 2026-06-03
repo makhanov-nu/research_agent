@@ -72,12 +72,14 @@ def read_latest_metrics(artifact_dir: str) -> dict:
 
 
 class ExperimentRunner:
-    def __init__(self, episodic, backend, workspace, artifacts_dir: str, projects=None):
+    def __init__(self, episodic, backend, workspace, artifacts_dir: str,
+                 projects=None, memory=None):
         self.episodic = episodic
         self.backend = backend
         self.workspace = workspace
         self.artifacts_dir = artifacts_dir
         self.projects = projects
+        self.memory = memory  # MemoryManager: lessons (record/recall) loop
 
     @property
     def enabled(self) -> bool:
@@ -341,6 +343,7 @@ class ExperimentRunner:
             exp_id, status=status.state.value, metrics=metrics, artifacts=artifacts,
         )
         await self._record_to_project(exp, dest, status.state.value, metrics, cfg)
+        await self._consolidate_outcome(exp, handle, status.state.value, metrics)
         msg = (
             f"Experiment #{exp_id} ({exp['title']}) {status.state.value}."
             + (f" metrics: {metrics}" if metrics else "")
@@ -349,6 +352,67 @@ class ExperimentRunner:
             experiment_id=exp_id, channel_id=exp.get("channel_id"),
             title=exp["title"], state=status.state.value, message=msg,
         )
+
+    async def _consolidate_outcome(self, exp, handle, state, metrics) -> None:
+        """Turn an experiment outcome into a durable, reusable lesson.
+
+        On failure: fetch the container logs and have an LLM extract the root
+        cause + how to avoid it. On success: record what worked. Stored as a
+        semantic lesson (recall_lessons surfaces it for future experiments).
+        """
+        if self.memory is None:
+            return
+        title = exp.get("title") or f"experiment #{exp['id']}"
+        channel_id = exp.get("channel_id")
+        try:
+            await self.memory.log_experience(
+                "experiment_outcome", f"{title}: {state} (metrics={metrics})",
+                channel_id, {"experiment_id": exp["id"], "state": state},
+            )
+            if state == "failed":
+                logs = ""
+                try:
+                    logs = await self.backend.logs(handle, tail=120)
+                except Exception:  # noqa: BLE001
+                    pass
+                lesson = await self._extract_failure_lesson(title, logs)
+            elif state == "succeeded":
+                lesson = (
+                    f"Experiment '{title}' succeeded with metrics {metrics}. "
+                    "This approach/configuration worked — reuse it as a baseline."
+                )
+            else:
+                return
+            if lesson:
+                await self.memory.record_lesson(
+                    lesson, kind="experiment", channel_id=channel_id, status=state,
+                )
+        except Exception:  # noqa: BLE001 — lessons must not break the poller
+            logger.exception("Outcome consolidation failed for experiment %s", exp.get("id"))
+
+    async def _extract_failure_lesson(self, title: str, logs: str) -> str:
+        """LLM-extract a concise, reusable lesson from a failed run's logs."""
+        if not logs.strip():
+            return f"Experiment '{title}' failed but produced no logs — add error logging."
+        from ..llm import get_llm
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        try:
+            resp = await get_llm().ainvoke([
+                SystemMessage(content=(
+                    "An ML experiment failed. From the logs, write ONE concise lesson "
+                    "(1-3 sentences) capturing the root cause and how to AVOID it next "
+                    "time. Be specific and actionable; start with the failure mode."
+                )),
+                HumanMessage(content=f"Experiment: {title}\n\nLogs (tail):\n{logs[-4000:]}"),
+            ])
+            text = resp.content
+            if isinstance(text, list):
+                text = "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in text)
+            return f"[experiment failure] {title}: {text.strip()}"
+        except Exception:  # noqa: BLE001
+            logger.exception("Failure-lesson extraction failed")
+            return ""
 
     async def _record_to_project(self, exp, dest, state, metrics, cfg) -> None:
         """Assemble the experiment folder under the project and register it.
