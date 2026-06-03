@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from starlette.requests import Request
+
 from ..config import settings
 
 logger = logging.getLogger(__name__)
@@ -76,7 +78,7 @@ def authenticate_code(code: str) -> dict:
     return {"email": email, "name": name or email}
 
 
-def require_user(request) -> dict:
+def require_user(request: Request) -> dict:
     """FastAPI dependency: return the session user or 401."""
     from fastapi import HTTPException
 
