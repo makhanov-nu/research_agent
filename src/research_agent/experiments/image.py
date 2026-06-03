@@ -13,7 +13,10 @@ stdin over SSH (`docker build -t <tag> -`) — no file upload needed.
 from __future__ import annotations
 
 # Libraries every experiment can assume are present (kept broad but not huge).
+# flash-attn is intentionally excluded: it compiles from source and often breaks
+# the build — add it per-experiment via requirements.txt when a run needs it.
 _PINNED_PACKAGES = [
+    # core
     "datasets>=2.19",
     "transformers>=4.41",
     "accelerate>=0.30",
@@ -26,6 +29,15 @@ _PINNED_PACKAGES = [
     "numpy>=1.26",
     "sentencepiece>=0.2",
     "tqdm>=4.66",
+    "einops>=0.8",
+    # LLM fine-tuning
+    "peft>=0.11",
+    "trl>=0.9",
+    "bitsandbytes>=0.43",
+    # computer vision
+    "timm>=1.0",
+    "albumentations>=1.4",
+    "opencv-python-headless>=4.9",
 ]
 
 

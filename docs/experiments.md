@@ -11,9 +11,11 @@ pre-installed. Each experiment records the box it ran on, so status/logs/poll ke
 hitting the right host even after a new box is attached.
 
 A **universal experiment image** (`EXPERIMENT_IMAGE`, see
-`docker/experiment.Dockerfile`) bakes the common ML stack (torch+CUDA, datasets,
-transformers, accelerate, optuna, mlflow, scikit-learn, …) so jobs don't reinstall
-it each run. It's built once on the box at provision time (from the embedded
+`docker/experiment.Dockerfile`) bakes the common ML stack so jobs don't reinstall
+it each run: torch+CUDA, datasets, transformers, accelerate, optuna, mlflow,
+scikit-learn, einops; **LLM fine-tuning** (peft, trl, bitsandbytes); and
+**computer vision** (timm, albumentations, opencv-python-headless). `flash-attn`
+is excluded (fragile source build) — add it per-experiment when needed. It's built once on the box at provision time (from the embedded
 Dockerfile over SSH, no upload), or `docker pull`ed if `EXPERIMENT_IMAGE` is a
 registry reference. Jobs add only their *extra* deps via a small requirements.txt.
 

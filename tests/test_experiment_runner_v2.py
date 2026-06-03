@@ -71,6 +71,10 @@ def test_build_experiment_dockerfile():
     assert df.startswith("FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime\n")
     assert "pip install --no-cache-dir" in df
     assert "optuna" in df and "mlflow" in df and "datasets" in df
+    # LLM fine-tuning + CV extras are baked in
+    assert "peft" in df and "trl" in df and "bitsandbytes" in df
+    assert "timm" in df and "albumentations" in df
+    assert "flash-attn" not in df  # excluded on purpose (fragile source build)
     # single FROM, single RUN — builds from stdin with no context
     assert df.count("FROM ") == 1
 

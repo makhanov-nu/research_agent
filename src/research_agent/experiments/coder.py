@@ -39,8 +39,10 @@ with the headline metrics (include `best_value` and key `best_params`), and save
 any model/plots under /output.
 6. The runtime image ALREADY has: torch + CUDA, datasets, transformers, \
 accelerate, evaluate, optuna, mlflow, scikit-learn, scipy, pandas, numpy, \
-sentencepiece, tqdm. Do NOT reinstall these. Only add a `requirements.txt` if you \
-import something NOT in that list (keep it minimal); otherwise omit it.
+sentencepiece, tqdm, einops; for LLM fine-tuning: peft, trl, bitsandbytes; for \
+computer vision: timm, albumentations, opencv-python-headless. Do NOT reinstall \
+these. Only add a `requirements.txt` for something NOT listed (e.g. flash-attn); \
+otherwise omit it.
 
 Output format — emit each file as:
 === FILE: <relative/path> ===

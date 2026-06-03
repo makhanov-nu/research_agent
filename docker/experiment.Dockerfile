@@ -13,6 +13,8 @@ ENV PIP_NO_CACHE_DIR=1 \
     HF_HOME=/root/.cache/huggingface \
     PYTHONUNBUFFERED=1
 
+# flash-attn is intentionally excluded (compiles from source, fragile) — add it
+# per-experiment via requirements.txt when a run needs it.
 RUN pip install --no-cache-dir \
     "datasets>=2.19" \
     "transformers>=4.41" \
@@ -25,4 +27,11 @@ RUN pip install --no-cache-dir \
     "pandas>=2.0" \
     "numpy>=1.26" \
     "sentencepiece>=0.2" \
-    "tqdm>=4.66"
+    "tqdm>=4.66" \
+    "einops>=0.8" \
+    "peft>=0.11" \
+    "trl>=0.9" \
+    "bitsandbytes>=0.43" \
+    "timm>=1.0" \
+    "albumentations>=1.4" \
+    "opencv-python-headless>=4.9"
