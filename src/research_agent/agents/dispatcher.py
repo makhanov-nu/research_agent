@@ -74,11 +74,23 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
                     project["id"], kind, Path(r["tex_path"]).stem, rel,
                     {"n_refs": r["n_refs"]},
                 )
+            missing = r.get("missing_citations") or []
+            warn = (
+                f" ⚠ {len(missing)} undefined cite(s): "
+                f"{', '.join(missing[:8])}{'…' if len(missing) > 8 else ''}"
+                if missing else ""
+            )
             summary = (
                 f"Wrote a LaTeX {label} with {r['n_refs']} references{tag}: "
-                f"`!getfile {rel}`"
+                f"`!getfile {rel}`{warn}"
             )
-            return summary, [{"type": "artifact", "tex": r["tex_path"], "bib": r["bib_path"]}]
+            # Record the writer's full reasoning/tool-call trace to the dashboard,
+            # with the saved artifact appended as a final step.
+            trace = (r.get("trace") or []) + [
+                {"type": "artifact", "tex": r["tex_path"], "bib": r["bib_path"],
+                 "missing_citations": missing}
+            ]
+            return summary, trace
 
         return _run
 
@@ -100,7 +112,10 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
                     extra = [{"type": "council", "path": council_rel}]
             # Capture to memory so future ideation builds on this session.
             await capture_council(memory, channel_id, task, r["ideas"], r["rel_path"])
-            return r["ideas"], [{"type": "transcript", "path": r["rel_path"]}, *extra]
+            trace = (r.get("trace") or []) + [
+                {"type": "transcript", "path": r["rel_path"]}, *extra
+            ]
+            return r["ideas"], trace
 
         runners["consortium"] = _consortium
 

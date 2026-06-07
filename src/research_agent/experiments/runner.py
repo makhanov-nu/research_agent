@@ -20,6 +20,7 @@ from .types import (
     JobHandle,
     JobSpec,
     JobState,
+    JobStatus,
     Resources,
 )
 
@@ -328,8 +329,24 @@ class ExperimentRunner:
             return None  # box for this experiment isn't reachable/recorded
 
         status = await self.backend.status(handle)
+        timed_out = False
         if status.state not in TERMINAL_STATES:
-            return None
+            overrun = self._time_limit_overrun(cfg)
+            if overrun is None:
+                return None  # still running, within its wall-clock budget
+            # Wall-clock limit exceeded: stop the container and fail the run, so a
+            # runaway job can't hold the GPU forever. This is the enforcement the
+            # `time_limit_minutes` knob promises (poller-enforced).
+            logger.info(
+                "Experiment %s exceeded its %d-minute time limit; cancelling.",
+                exp_id, overrun,
+            )
+            try:
+                await self.backend.cancel(handle)
+            except Exception:  # noqa: BLE001 — record the timeout regardless
+                logger.exception("Failed to stop timed-out experiment %s", exp_id)
+            status = JobStatus(JobState.FAILED, detail=f"time limit exceeded ({overrun}m)")
+            timed_out = True
 
         dest = str(Path(self.artifacts_dir) / f"exp_{exp_id}")
         try:
@@ -338,27 +355,66 @@ class ExperimentRunner:
             logger.exception("Artifact fetch failed for experiment %s", exp_id)
         metrics = read_latest_metrics(dest)
         artifacts = _list_artifacts(dest)
+        state = status.state.value
 
-        await self.episodic.update_experiment(
-            exp_id, status=status.state.value, metrics=metrics, artifacts=artifacts,
+        fields = {"status": state, "metrics": metrics, "artifacts": artifacts}
+        if timed_out:
+            fields["notes"] = (
+                f"timed out: exceeded the {self._time_limit(cfg)}-minute wall-clock limit"
+            )
+        await self.episodic.update_experiment(exp_id, **fields)
+        await self._record_to_project(exp, dest, state, metrics, cfg)
+        reason = (
+            f"exceeded its {self._time_limit(cfg)}-minute wall-clock limit"
+            if timed_out else ""
         )
-        await self._record_to_project(exp, dest, status.state.value, metrics, cfg)
-        await self._consolidate_outcome(exp, handle, status.state.value, metrics)
+        await self._consolidate_outcome(exp, handle, state, metrics, reason=reason)
         msg = (
-            f"Experiment #{exp_id} ({exp['title']}) {status.state.value}."
+            f"Experiment #{exp_id} ({exp['title']}) {state}"
+            + (" (timed out)" if timed_out else "")
             + (f" metrics: {metrics}" if metrics else "")
         )
         return StateChange(
             experiment_id=exp_id, channel_id=exp.get("channel_id"),
-            title=exp["title"], state=status.state.value, message=msg,
+            title=exp["title"], state=state, message=msg,
         )
 
-    async def _consolidate_outcome(self, exp, handle, state, metrics) -> None:
+    @staticmethod
+    def _time_limit(cfg: dict) -> int:
+        """Configured wall-clock limit in minutes (0 = unlimited)."""
+        try:
+            return int((cfg.get("resources") or {}).get("time_limit_minutes") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _time_limit_overrun(self, cfg: dict) -> int | None:
+        """The limit (minutes) if a running job has outrun it, else None.
+
+        Reads the `started_at` stamped at launch; tolerant of missing/garbled
+        values (returns None = "let it keep running") so a bad timestamp can
+        never wrongly kill a job.
+        """
+        limit = self._time_limit(cfg)
+        started = cfg.get("started_at")
+        if limit <= 0 or not started:
+            return None
+        try:
+            started_dt = datetime.fromisoformat(started)
+        except (TypeError, ValueError):
+            return None
+        if started_dt.tzinfo is None:
+            started_dt = started_dt.replace(tzinfo=timezone.utc)
+        elapsed_min = (datetime.now(timezone.utc) - started_dt).total_seconds() / 60
+        return limit if elapsed_min > limit else None
+
+    async def _consolidate_outcome(self, exp, handle, state, metrics, reason: str = "") -> None:
         """Turn an experiment outcome into a durable, reusable lesson.
 
         On failure: fetch the container logs and have an LLM extract the root
-        cause + how to avoid it. On success: record what worked. Stored as a
-        semantic lesson (recall_lessons surfaces it for future experiments).
+        cause + how to avoid it. On success: record what worked. When `reason` is
+        given (e.g. a timeout), it's used directly instead of fetching logs — the
+        container is already gone, so there are none to read. Stored as a semantic
+        lesson (recall_lessons surfaces it for future experiments).
         """
         if self.memory is None:
             return
@@ -369,7 +425,12 @@ class ExperimentRunner:
                 "experiment_outcome", f"{title}: {state} (metrics={metrics})",
                 channel_id, {"experiment_id": exp["id"], "state": state},
             )
-            if state == "failed":
+            if state == "failed" and reason:
+                lesson = (
+                    f"[experiment timeout] '{title}' {reason}. Next time shrink the "
+                    "search space / n_trials / epochs, or raise the time limit."
+                )
+            elif state == "failed":
                 logs = ""
                 try:
                     logs = await self.backend.logs(handle, tail=120)

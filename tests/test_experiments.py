@@ -136,6 +136,7 @@ class _FakeBackend:
 
     def __init__(self):
         self.submitted = []
+        self.cancelled = []
         self.state = JobState.RUNNING
         self.host, self.user, self.port, self.key = "h", "u", 22, ""
 
@@ -155,7 +156,7 @@ class _FakeBackend:
         return "log line"
 
     async def cancel(self, handle):
-        pass
+        self.cancelled.append(handle)
 
     async def fetch_artifacts(self, handle, dest_local):
         return []
@@ -216,3 +217,49 @@ async def test_poll_active_reports_completion(tmp_path):
     assert changes[0].experiment_id == exp_id
     assert changes[0].state == "succeeded"
     assert ep.rows[exp_id]["status"] == "succeeded"
+
+
+def _mark_running(ep, be, exp_id, *, minutes_ago, limit):
+    """Put an experiment into the running state, launched `minutes_ago` with a
+    `limit`-minute wall-clock budget."""
+    from datetime import datetime, timedelta, timezone
+
+    ep.rows[exp_id]["status"] = "running"
+    ep.rows[exp_id]["config"]["handle"] = JobHandle(
+        be.name, "deadbeef", {"output_remote": "/o"}
+    ).to_dict()
+    ep.rows[exp_id]["config"]["resources"] = {"time_limit_minutes": limit}
+    ep.rows[exp_id]["config"]["started_at"] = (
+        datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    ).isoformat()
+
+
+async def test_poll_enforces_time_limit(tmp_path):
+    """A still-running job past its wall-clock budget is stopped and failed."""
+    ep, be = _FakeEpisodic(), _FakeBackend()
+    runner = _runner(tmp_path, ep, be)
+    exp_id = await runner.propose("T", "H", "P", channel_id="c1")
+    await runner.write_code(exp_id, {"train.py": "x"})
+    _mark_running(ep, be, exp_id, minutes_ago=30, limit=5)
+    be.state = JobState.RUNNING  # backend still reports it alive
+
+    changes = await runner.poll_active()
+    assert len(changes) == 1
+    assert changes[0].state == "failed"
+    assert "timed out" in changes[0].message
+    assert ep.rows[exp_id]["status"] == "failed"
+    assert be.cancelled, "the runaway container should have been stopped"
+
+
+async def test_poll_leaves_job_running_within_budget(tmp_path):
+    """A running job still inside its budget is left alone (no false-positive kill)."""
+    ep, be = _FakeEpisodic(), _FakeBackend()
+    runner = _runner(tmp_path, ep, be)
+    exp_id = await runner.propose("T", "H", "P", channel_id="c1")
+    await runner.write_code(exp_id, {"train.py": "x"})
+    _mark_running(ep, be, exp_id, minutes_ago=1, limit=60)
+    be.state = JobState.RUNNING
+
+    assert await runner.poll_active() == []
+    assert not be.cancelled
+    assert ep.rows[exp_id]["status"] == "running"

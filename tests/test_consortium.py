@@ -49,7 +49,8 @@ class _FakeConsortium(Consortium):
 
     async def _agent_say(self, model, instruction, transcript):
         self.said.append((model, instruction))
-        return f"{model} says something"
+        # Real contract is (reply_text, message_history); fakes carry no history.
+        return f"{model} says something", []
 
 
 @pytest.mark.asyncio
@@ -103,5 +104,38 @@ async def test_session_finalize_saves_document(tmp_path):
     await session.run_round()
     result = await session.finalize()
     assert session.finalized and result["rounds"] == 1
+    # The dashboard trace is always present (empty here: the fakes carry no history).
+    assert result["trace"] == []
     saved = next((tmp_path / "ideas").glob("*.md"))
     assert "# Research ideas — my topic" in saved.read_text()
+
+
+@pytest.mark.asyncio
+async def test_session_accumulates_reasoning_trace(tmp_path):
+    """Panelist + chair turns (with tool calls) are folded into the trace."""
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    class _TracingConsortium(Consortium):
+        def __init__(self, tmp_path):
+            super().__init__([], ["m/a", "m/b"], "chair/x", str(tmp_path))
+
+        async def _agent_say(self, model, instruction, transcript):
+            ai = AIMessage(
+                content="",
+                tool_calls=[{"name": "search", "args": {"q": "x"}, "id": "tc1"}],
+            )
+            tool = ToolMessage(content="a result", tool_call_id="tc1", name="search")
+            final = AIMessage(content=f"{model} proposes")
+            # Leading human prompt should be dropped from the collected trace.
+            return f"{model} proposes", [HumanMessage(content="prompt"), ai, tool, final]
+
+    c = _TracingConsortium(tmp_path)
+    session = c.new_session("topic")
+    await session.run_round()  # two panelists
+    result = await session.finalize()  # + chair
+    trace = result["trace"]
+    # No prompt-echo steps survive; every step is tagged with its speaker.
+    assert all(s["type"] != "human" for s in trace)
+    assert {s["speaker"] for s in trace} == {"m/a", "m/b", "chair"}
+    # The literature tool call is captured.
+    assert any(s.get("tool_calls") for s in trace)
