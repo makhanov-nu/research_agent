@@ -343,8 +343,20 @@ class ExperimentRunner:
             )
             try:
                 await self.backend.cancel(handle)
-            except Exception:  # noqa: BLE001 — record the timeout regardless
+            except Exception as exc:  # noqa: BLE001 — keep it running so a later poll retries
+                # If we can't stop it, the container may still be alive and holding
+                # the GPU. Do NOT mark it terminal (it would drop out of the active
+                # filter and never be retried) — leave it running with a note so the
+                # next poll attempts the cancel again.
                 logger.exception("Failed to stop timed-out experiment %s", exp_id)
+                await self.episodic.update_experiment(
+                    exp_id,
+                    notes=(
+                        f"time limit ({overrun}m) exceeded but cancellation failed "
+                        f"({exc}); will retry on the next poll"
+                    ),
+                )
+                return None
             status = JobStatus(JobState.FAILED, detail=f"time limit exceeded ({overrun}m)")
             timed_out = True
 

@@ -124,7 +124,8 @@ class _FakeEpisodic:
         return self.rows.get(experiment_id)
 
     async def list_active_experiments(self):
-        return [r for r in self.rows.values() if r["status"] in {"building", "running"}]
+        # Mirror production: only 'running' experiments are still in flight.
+        return [r for r in self.rows.values() if r["status"] == "running"]
 
     async def log_action(self, *a, **k):
         pass
@@ -263,3 +264,37 @@ async def test_poll_leaves_job_running_within_budget(tmp_path):
     assert await runner.poll_active() == []
     assert not be.cancelled
     assert ep.rows[exp_id]["status"] == "running"
+
+
+async def test_poll_keeps_running_when_timeout_cancel_fails(tmp_path):
+    """If stopping a timed-out run fails, it stays running so the next poll retries
+    (rather than being marked failed and dropping out of the active filter -> a
+    container that keeps holding the GPU)."""
+
+    class _FlakyBackend(_FakeBackend):
+        cancel_should_fail = True
+
+        async def cancel(self, handle):
+            if self.cancel_should_fail:
+                raise RuntimeError("ssh down")
+            await super().cancel(handle)
+
+    ep, be = _FakeEpisodic(), _FlakyBackend()
+    runner = _runner(tmp_path, ep, be)
+    exp_id = await runner.propose("T", "H", "P", channel_id="c1")
+    await runner.write_code(exp_id, {"train.py": "x"})
+    _mark_running(ep, be, exp_id, minutes_ago=30, limit=5)
+    be.state = JobState.RUNNING
+
+    # First poll: cancel fails -> not terminal, still running, note recorded.
+    assert await runner.poll_active() == []
+    assert not be.cancelled
+    assert ep.rows[exp_id]["status"] == "running"
+    assert "cancellation failed" in (ep.rows[exp_id].get("notes") or "")
+
+    # Next poll: cancel succeeds -> the run is stopped, failed, and reported.
+    be.cancel_should_fail = False
+    changes = await runner.poll_active()
+    assert len(changes) == 1 and changes[0].state == "failed"
+    assert be.cancelled
+    assert ep.rows[exp_id]["status"] == "failed"

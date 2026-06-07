@@ -62,8 +62,9 @@ def build_consortium_tool(consortium, task_store=None, projects=None, memory=Non
         if task_store is not None:
             trace = (result.get("trace") or []) + [
                 {"type": "transcript", "path": result["rel_path"]},
-                {"type": "council", "path": council_rel},
             ]
+            if council_rel:
+                trace.append({"type": "council", "path": council_rel})
             await task_store.finish(task_id, result["ideas"], trace)
         return out
 
