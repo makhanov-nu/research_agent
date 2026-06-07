@@ -13,6 +13,7 @@ from research_agent.writing.latex import (
     parse_latex_artifact,
     slugify,
     timestamped,
+    undefined_citations,
     write_tex_bib,
 )
 
@@ -43,6 +44,42 @@ def test_parse_latex_artifact_fallback():
     latex, bibtex, n_refs = parse_latex_artifact("plain text, no fences")
     assert latex == "plain text, no fences"
     assert bibtex == "" and n_refs == 0
+
+
+def test_undefined_citations_flags_missing_keys():
+    latex = "Text~\\cite{a}, \\citep{b,c}, and \\citet[p.~5]{d}."
+    bibtex = "@article{a,}\n@misc{b,}\n@book{d,}"
+    assert undefined_citations(latex, bibtex) == ["c"]  # only c lacks an entry
+
+
+def test_undefined_citations_none_when_all_defined():
+    assert undefined_citations("\\cite{x}", "@article{x, title={X}}") == []
+    assert undefined_citations("no citations here", "") == []
+
+
+async def test_draft_captures_trace_and_flags_undefined_citations(tmp_path):
+    """_draft returns the reasoning trace + dangling-citation report."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from research_agent.writing.methodology import MethodologyWriter
+
+    output = (
+        "```latex\n\\section{Methodology}\nWe cite~\\cite{known} and~\\cite{ghost}.\n```\n"
+        "```bibtex\n@article{known, title={K}, year={2024}}\n```\n"
+    )
+
+    class _StubWriter(MethodologyWriter):
+        async def _generate(self, task, recursion_limit=40):
+            return output, [HumanMessage(content=task), AIMessage(content=output)]
+
+    w = _StubWriter(llm=None, tools=[], output_dir=str(tmp_path))
+    r = await w.draft("an idea", dirpath=tmp_path / "m")
+
+    assert r["missing_citations"] == ["ghost"]  # known is defined, ghost is not
+    assert r["n_refs"] == 1
+    # The trace is the serialized reasoning history, not just an artifact pointer.
+    assert [s["type"] for s in r["trace"]] == ["human", "ai"]
+    assert list((tmp_path / "m").glob("*.tex"))
 
 
 def test_slugify_default():

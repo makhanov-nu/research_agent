@@ -35,7 +35,6 @@ CREATE TABLE IF NOT EXISTS conversations (
     summary        TEXT NOT NULL DEFAULT '',
     archived       BOOLEAN NOT NULL DEFAULT FALSE,
     total_tokens   BIGINT NOT NULL DEFAULT 0,
-    last_nudge_tokens BIGINT NOT NULL DEFAULT 0,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -122,20 +121,6 @@ class EpisodicStore:
                 ON CONFLICT (channel_id) DO UPDATE SET summary = EXCLUDED.summary
                 """,
                 (channel_id, summary),
-            )
-
-    async def set_last_nudge_tokens(self, channel_id: str, tokens: int) -> None:
-        if not self.enabled:
-            return
-        async with self.pool.connection() as conn:
-            await conn.execute(
-                """
-                INSERT INTO conversations (channel_id, last_nudge_tokens)
-                VALUES (%s, %s)
-                ON CONFLICT (channel_id) DO UPDATE
-                  SET last_nudge_tokens = EXCLUDED.last_nudge_tokens
-                """,
-                (channel_id, tokens),
             )
 
     async def list_idle_channels(self, idle_days: int) -> list[dict]:
@@ -243,13 +228,12 @@ class EpisodicStore:
             return await cur.fetchone()
 
     async def list_active_experiments(self) -> list[dict]:
-        """Experiments still in flight (building or running)."""
+        """Experiments still in flight (launched and running)."""
         if not self.enabled:
             return []
         async with self.pool.connection() as conn:
             cur = await conn.execute(
-                "SELECT * FROM experiments WHERE status IN ('building', 'running') "
-                "ORDER BY created_at"
+                "SELECT * FROM experiments WHERE status = 'running' ORDER BY created_at"
             )
             return await cur.fetchall()
 

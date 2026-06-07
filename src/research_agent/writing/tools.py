@@ -79,18 +79,28 @@ def build_writing_tools(writers, task_store=None, projects=None) -> list[BaseToo
                 project["id"], kind, Path(result["tex_path"]).stem, rel,
                 {"n_refs": result["n_refs"], "bib": _rel_to_outputs(result["bib_path"]) if result["bib_path"] else ""},
             )
+        missing = result.get("missing_citations") or []
+        warn = (
+            f"\n⚠ {len(missing)} citation(s) with no BibTeX entry: "
+            f"{', '.join(missing[:8])}{'…' if len(missing) > 8 else ''}"
+            if missing else ""
+        )
         summary = (
             f"Wrote a LaTeX {agent.replace('_', ' ')} with {result['n_refs']} "
             f"references"
             + (f" (project: {project['name']})" if project else "")
             + f".\nSaved: `{Path(result['tex_path']).name}` — retrieve with `!getfile {rel}`."
+            + warn
         )
         if task_store is not None:
-            await task_store.finish(
-                task_id, summary,
-                [{"type": "artifact", "tex": result["tex_path"],
-                  "bib": result["bib_path"], "n_refs": result["n_refs"]}],
-            )
+            # Persist the subagent's full reasoning/tool-call trace, with the saved
+            # artifact (and any dangling citations) appended as a final step.
+            trace = (result.get("trace") or []) + [
+                {"type": "artifact", "tex": result["tex_path"],
+                 "bib": result["bib_path"], "n_refs": result["n_refs"],
+                 "missing_citations": missing}
+            ]
+            await task_store.finish(task_id, summary, trace)
         return summary
 
     @tool

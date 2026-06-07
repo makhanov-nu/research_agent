@@ -60,11 +60,12 @@ def build_consortium_tool(consortium, task_store=None, projects=None, memory=Non
             )
         out += f"\n(Full transcript: `!getfile {result['rel_path']}`)"
         if task_store is not None:
-            await task_store.finish(
-                task_id, result["ideas"],
-                [{"type": "transcript", "path": result["rel_path"]},
-                 {"type": "council", "path": council_rel}],
-            )
+            trace = (result.get("trace") or []) + [
+                {"type": "transcript", "path": result["rel_path"]},
+            ]
+            if council_rel:
+                trace.append({"type": "council", "path": council_rel})
+            await task_store.finish(task_id, result["ideas"], trace)
         return out
 
     return brainstorm_research_ideas

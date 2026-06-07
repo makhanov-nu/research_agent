@@ -16,6 +16,9 @@ env/
 *.db
 *.sqlite
 *.sqlite3
+# TLS keys/certs (e.g. deploy/origin.key, deploy/origin.pem) — never commit
+*.key
+*.pem
 
 # Checkpointer / runtime data
 data/

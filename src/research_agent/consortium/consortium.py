@@ -124,8 +124,13 @@ class Consortium:
         return ConsortiumSession(self, topic, focus)
 
     async def _agent_say(self, model: str, instruction: str,
-                        transcript: list[tuple[str, str]]) -> str:
-        """Run a tool-using agent (panelist or chair) over the shared transcript."""
+                        transcript: list[tuple[str, str]]) -> tuple[str, list]:
+        """Run a tool-using agent (panelist or chair) over the shared transcript.
+
+        Returns (reply_text, full_message_history). The history carries each
+        panelist's reasoning and literature/web tool calls, which the session
+        accumulates into the dashboard trace.
+        """
         from langgraph.prebuilt import create_react_agent
 
         from ..llm import build_openrouter_chat
@@ -142,13 +147,14 @@ class Consortium:
             res = await agent.ainvoke(
                 {"messages": [("user", content)]}, config={"recursion_limit": 30}
             )
-            return _flatten(res["messages"][-1].content)
+            messages = res["messages"]
+            return _flatten(messages[-1].content), messages
         except Exception as exc:  # noqa: BLE001 — one model failing must not abort
             logger.exception("Consortium agent %s failed", model)
-            return f"[{model} could not respond: {exc}]"
+            return f"[{model} could not respond: {exc}]", []
 
     async def _synthesize(self, topic: str,
-                         transcript: list[tuple[str, str]]) -> str:
+                         transcript: list[tuple[str, str]]) -> tuple[str, list]:
         return await self._agent_say(self.chair_model, _chair_prompt(topic), transcript)
 
     def _save(self, topic: str, document: str) -> tuple[str, str]:
@@ -178,9 +184,32 @@ class ConsortiumSession:
         self.topic = topic
         self.focus = focus
         self.transcript: list[tuple[str, str]] = []
+        # Full reasoning + tool-call trace across all turns (for the dashboard).
+        self.trace: list[dict] = []
         self.round_no = 0
         self.busy = False
         self.finalized = False
+
+    @staticmethod
+    def _collect(speaker: str, round_no: int, messages: list) -> list[dict]:
+        """Serialize a turn's reasoning + tool calls, tagged with who/which round.
+
+        Drops the leading prompt (the transcript-so-far echo) — that text is
+        already preserved verbatim in `self.transcript`, so keeping it here would
+        just balloon the trace with duplicated context on every turn.
+        """
+        if not messages:
+            return []
+        from ..agents.middleware import serialize_messages
+
+        steps = []
+        for step in serialize_messages(messages):
+            if step.get("type") == "human":
+                continue
+            step["speaker"] = speaker
+            step["round"] = round_no
+            steps.append(step)
+        return steps
 
     @property
     def panel(self) -> list[str]:
@@ -207,8 +236,9 @@ class ConsortiumSession:
             instruction += _FEEDBACK_NOTE
 
         for model in self.panel:
-            text = await self.c._agent_say(model, instruction, self.transcript)
+            text, msgs = await self.c._agent_say(model, instruction, self.transcript)
             self.transcript.append((model, text))
+            self.trace.extend(self._collect(model, self.round_no, msgs))
         return self._round_digest()
 
     def _round_digest(self) -> str:
@@ -216,11 +246,13 @@ class ConsortiumSession:
         return "\n\n".join(f"**{model}**\n{text}" for model, text in last)
 
     async def finalize(self) -> dict:
-        final = await self.c._synthesize(self.topic, self.transcript)
+        final, chair_msgs = await self.c._synthesize(self.topic, self.transcript)
+        self.trace.extend(self._collect("chair", self.round_no, chair_msgs))
         document = build_document(self.topic, final, self.transcript)
         path, rel_path = self.c._save(self.topic, document)
         self.finalized = True
         return {
             "ideas": final, "path": path, "rel_path": rel_path,
             "n_models": len(self.panel), "rounds": self.round_no,
+            "trace": self.trace,
         }
