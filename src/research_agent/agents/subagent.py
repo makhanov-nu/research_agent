@@ -85,8 +85,13 @@ def build_subagent_tool(
         from ..projects import resolve_project
 
         channel = _channel(config)
-        project = await resolve_project(projects, config)
-        proj_slug = project["slug"] if project else None
+        # Project tag is optional metadata — never let resolving it abort the job.
+        try:
+            project = await resolve_project(projects, config)
+            proj_slug = project["slug"] if project else None
+        except Exception:  # noqa: BLE001
+            logger.exception("Project resolution failed for %s", name)
+            proj_slug = None
         task_id = None
         if task_store is not None:
             task_id = await task_store.create(name, task, channel)

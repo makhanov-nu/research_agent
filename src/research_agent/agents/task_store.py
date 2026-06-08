@@ -149,7 +149,7 @@ class TaskStore:
         sql = (
             "SELECT id, agent, input, result, trace, quality, feedback, created_at "
             "FROM tasks WHERE " + " AND ".join(clauses) +
-            " ORDER BY created_at LIMIT %s"
+            " ORDER BY created_at, id LIMIT %s"
         )
         async with self.pool.connection() as conn:
             cur = await conn.execute(sql, params)

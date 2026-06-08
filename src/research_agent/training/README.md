@@ -15,7 +15,7 @@ token-routed mixture that's heavy to train and serve.
 Every completed subagent task is logged automatically. Improve label quality by
 rating results in Discord:
 
-```
+```text
 !feedback <task_id> good
 !feedback <task_id> bad missed the 2024 survey; always include a limitations para
 ```

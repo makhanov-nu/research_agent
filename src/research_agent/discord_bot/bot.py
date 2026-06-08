@@ -526,7 +526,7 @@ class ResearchBot(discord.Client):
         ok = await self.tasks.set_feedback(task_id, quality, note or None)
         agent = task.get("agent") or "subagent"
         banked = False
-        if self.memory is not None:
+        if ok and self.memory is not None:
             try:
                 project = (
                     await self.projects.get_by_channel(str(message.channel.id))

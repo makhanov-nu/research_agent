@@ -141,6 +141,29 @@ async def test_reflect_and_record_distills_and_tags(monkeypatch):
     assert all(meta.get("project") == "p1" for _, meta in m.semantic.facts)
 
 
+@pytest.mark.asyncio
+async def test_reflect_respects_max_lessons_cap(monkeypatch):
+    """The cap is honored before persisting (so it can't over-record by one)."""
+    import research_agent.llm as llm_mod
+    from research_agent.config import settings
+
+    monkeypatch.setattr(settings, "reflection_max_lessons", 1)
+
+    class _Resp:
+        content = "Lesson one here.\nLesson two here."
+
+    class _LLM:
+        async def ainvoke(self, messages):
+            return _Resp()
+
+    monkeypatch.setattr(llm_mod, "build_reflection_llm", lambda: _LLM())
+
+    m = _manager()
+    n = await m.reflect_and_record("literature", "task", "result")
+    assert n == 1
+    assert len(m.semantic.facts) == 1
+
+
 # --- the reusable prime/reflect helpers --------------------------------------
 
 class _LoopMem:

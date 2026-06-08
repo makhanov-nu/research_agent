@@ -15,6 +15,8 @@ from typing import Awaitable, Callable
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 
+from ..config import settings
+
 logger = logging.getLogger(__name__)
 
 # The dispatcher is GLOBAL (one pool across all projects), so a runner is given
@@ -67,7 +69,7 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
                 dirpath = projects.kind_dir(project["slug"], kind)
             # Prime with relevant lessons from past jobs of this kind.
             lessons = ""
-            if memory is not None:
+            if memory is not None and settings.lessons_enabled:
                 try:
                     lessons = await memory.recall_lessons(task, kind=agent)
                 except Exception:  # noqa: BLE001 — recall must not break the job

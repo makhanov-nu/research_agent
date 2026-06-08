@@ -38,6 +38,16 @@ def test_task_to_example_skips_empty_input_or_result():
     assert task_to_example({"agent": "x", "input": "a", "result": ""}) is None
 
 
+def test_safe_filename_sanitizes_agent_names():
+    from research_agent.training.export import _safe_filename
+
+    assert _safe_filename("research_literature") == "research_literature"
+    assert _safe_filename("../etc/passwd") == "etc_passwd"      # no traversal
+    assert _safe_filename("a/b\\c") == "a_b_c"                   # no path separators
+    assert _safe_filename("") == "unknown"
+    assert _safe_filename("...") == "unknown"
+
+
 def test_system_prompt_for_known_and_fallback():
     # Known role -> its real system prompt.
     assert "methodolog" in system_prompt_for("methodology").lower()

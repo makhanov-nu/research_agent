@@ -20,11 +20,18 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 _FALLBACK_SYSTEM = "You are a specialized research subagent. Complete the task precisely."
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _safe_filename(agent: str) -> str:
+    """A filesystem-safe stem for an agent name (it comes from stored data)."""
+    return _UNSAFE_NAME.sub("_", (agent or "unknown").strip()).strip("._") or "unknown"
 
 
 def system_prompt_for(agent: str) -> str:
@@ -104,7 +111,7 @@ async def export_dataset(
 
     manifest: dict[str, dict] = {}
     for agent, examples in sorted(by_agent.items()):
-        path = out / f"{agent}.jsonl"
+        path = out / f"{_safe_filename(agent)}.jsonl"
         with path.open("w", encoding="utf-8") as f:
             for example in examples:
                 f.write(json.dumps(example, default=str, ensure_ascii=False) + "\n")
@@ -142,6 +149,14 @@ def main() -> None:
                         help="ISO lower bound on created_at, e.g. 2026-01-01")
     args = parser.parse_args()
 
+    if args.since:
+        from datetime import datetime
+
+        try:
+            datetime.fromisoformat(args.since)
+        except ValueError:
+            parser.error(f"--since must be an ISO date/datetime, got {args.since!r}")
+
     async def _run() -> None:
         pool = await open_pool()
         if pool is None:
@@ -149,6 +164,7 @@ def main() -> None:
             return
         try:
             store = TaskStore(pool)
+            await store.setup()  # ensure the tasks schema (+ label columns) exists
             manifest = await export_dataset(
                 store, args.out, agents=args.agents, good_only=args.good_only,
                 include_trace=args.include_trace, since=args.since,

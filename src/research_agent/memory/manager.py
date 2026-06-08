@@ -112,6 +112,8 @@ class MemoryManager:
             return 0
         n = 0
         for line in text.splitlines():
+            if n >= n_max:  # honor the cap (incl. 0) before persisting anything
+                break
             lesson = line.strip(" \t-•*").rstrip()
             if len(lesson) < 8 or lesson.upper() == "NONE":
                 continue
@@ -119,8 +121,6 @@ class MemoryManager:
                 lesson, kind=agent_kind, channel_id=channel_id, project=project,
             )
             n += 1
-            if n >= n_max:
-                break
         return n
 
     async def record_lesson(
