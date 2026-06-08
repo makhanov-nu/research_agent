@@ -24,12 +24,17 @@ CREATE TABLE IF NOT EXISTS tasks (
     result       TEXT,
     trace        JSONB NOT NULL DEFAULT '[]'::jsonb,
     error        TEXT,
+    quality      TEXT,            -- user verdict: good|bad (the training label)
+    feedback     TEXT,            -- the user's correction/note, if any
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     started_at   TIMESTAMPTZ,
     finished_at  TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS tasks_channel_idx ON tasks (channel_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS tasks_status_idx ON tasks (status);
+-- Backfill the label columns on installs created before this change.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS quality TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS feedback TEXT;
 """
 
 
@@ -96,6 +101,59 @@ class TaskStore:
         async with self.pool.connection() as conn:
             cur = await conn.execute("SELECT * FROM tasks WHERE id=%s", (task_id,))
             return await cur.fetchone()
+
+    async def set_feedback(
+        self, task_id: int, quality: str, feedback: str | None = None
+    ) -> bool:
+        """Attach a user verdict (good|bad) + optional note to a task.
+
+        This is the training-quality label: it turns the logged (input, result,
+        trace) into a labeled example for later fine-tuning/distillation, and
+        lets you filter the corpus to only the trajectories you approved.
+        """
+        if not self.enabled:
+            return False
+        quality = (quality or "").lower()
+        if quality not in {"good", "bad"}:
+            raise ValueError(f"quality must be 'good' or 'bad', got {quality!r}")
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE tasks SET quality=%s, feedback=%s WHERE id=%s RETURNING id",
+                (quality, feedback, task_id),
+            )
+            return await cur.fetchone() is not None
+
+    async def list_for_export(
+        self, *, agents=None, quality=None, since=None, limit: int = 100_000
+    ) -> list[dict]:
+        """Completed, result-bearing tasks for the training exporter.
+
+        Optional filters: `agents` (roles), `quality` (e.g. ("good",)), and
+        `since` (created_at lower bound). Returns oldest-first so exports are
+        stable/append-friendly.
+        """
+        if not self.enabled:
+            return []
+        clauses = ["status = 'done'", "result IS NOT NULL", "result <> ''"]
+        params: list = []
+        if agents:
+            clauses.append("agent = ANY(%s)")
+            params.append(list(agents))
+        if quality:
+            clauses.append("quality = ANY(%s)")
+            params.append(list(quality))
+        if since:
+            clauses.append("created_at >= %s")
+            params.append(since)
+        params.append(limit)
+        sql = (
+            "SELECT id, agent, input, result, trace, quality, feedback, created_at "
+            "FROM tasks WHERE " + " AND ".join(clauses) +
+            " ORDER BY created_at, id LIMIT %s"
+        )
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(sql, params)
+            return await cur.fetchall()
 
     async def list_recent(self, limit: int = 15, channel_id: str | None = None) -> list[dict]:
         if not self.enabled:

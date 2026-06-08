@@ -56,7 +56,7 @@ class LiteratureReviewer(LatexWriter):
 
     async def draft(
         self, topic: str, focus: str = "", venue: str = "", save_name: str = "",
-        dirpath=None,
+        dirpath=None, lessons: str = "",
     ) -> dict:
         task = f"Topic: {topic}"
         if focus:
@@ -65,5 +65,6 @@ class LiteratureReviewer(LatexWriter):
             task += f"\nTarget venue/style: {venue}"
         task += "\nResearch the literature and write the Related Work section now."
         return await self._draft(
-            task, slug_source=topic, save_name=save_name, dirpath=dirpath
+            task, slug_source=topic, save_name=save_name, dirpath=dirpath,
+            lessons=lessons,
         )

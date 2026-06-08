@@ -50,6 +50,7 @@ class PaperWriter(LatexWriter):
         venue: str = "",
         save_name: str = "",
         dirpath=None,
+        lessons: str = "",
     ) -> dict:
         task = f"Brief:\n{brief}"
         if sections:
@@ -60,5 +61,6 @@ class PaperWriter(LatexWriter):
             task += f"\n\nSupporting material to use (do not contradict it):\n{material}"
         task += "\n\nDraft the LaTeX now."
         return await self._draft(
-            task, slug_source=brief, save_name=save_name, dirpath=dirpath
+            task, slug_source=brief, save_name=save_name, dirpath=dirpath,
+            lessons=lessons,
         )

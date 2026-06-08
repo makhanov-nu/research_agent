@@ -162,19 +162,22 @@ class SemanticMemory:
         except Exception:  # noqa: BLE001
             logger.exception("Semantic fact write failed.")
 
-    def recall(self, query: str, limit: int = 5, only_type: str | None = None) -> str:
+    def recall(self, query: str, limit: int = 5, only_type: str | None = None,
+               only_kind: str | None = None) -> str:
         """Return relevant facts as a citation-annotated block for the prompt.
 
-        `only_type` keeps only results whose metadata `type` matches (e.g.
-        "lesson"); filtered client-side so it works across mem0 versions.
+        `only_type`/`only_kind` keep only results whose metadata `type`/`kind`
+        match (e.g. type="lesson", kind="literature"); filtered client-side so it
+        works across mem0 versions. When filtering, we over-fetch then trim.
         """
         if not self.enabled:
             return ""
+        scoped = only_type or only_kind
         try:
             # mem0 2.x: scope by user via filters (top-level user_id is rejected).
             res = self._mem.search(
                 query, filters={"user_id": settings.memory_user_id},
-                limit=limit * 3 if only_type else limit,
+                limit=limit * 3 if scoped else limit,
             )
         except Exception:  # noqa: BLE001
             logger.exception("Semantic memory search failed.")
@@ -185,6 +188,8 @@ class SemanticMemory:
         for item in results or []:
             meta = item.get("metadata") or {}
             if only_type and meta.get("type") != only_type:
+                continue
+            if only_kind and meta.get("kind") != only_kind:
                 continue
             text = item.get("memory") or item.get("text") or ""
             src = meta.get("source")

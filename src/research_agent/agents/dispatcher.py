@@ -15,6 +15,8 @@ from typing import Awaitable, Callable
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 
+from ..config import settings
+
 logger = logging.getLogger(__name__)
 
 # The dispatcher is GLOBAL (one pool across all projects), so a runner is given
@@ -41,10 +43,10 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
     runners: dict[str, Runner] = {}
 
     if mcp_tools:
-        lit = build_literature_runner(model, mcp_tools)
+        lit = build_literature_runner(model, mcp_tools, memory=memory)
 
         async def _literature(task: str, channel_id: str | None) -> tuple[str, list]:
-            return await lit(task)  # research only; produces no saved artifact
+            return await lit(task, channel_id)  # research only; no saved artifact
 
         runners["research_literature"] = _literature
 
@@ -58,13 +60,21 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
         except ValueError:
             return Path(path).name
 
-    def _artifact_runner(writer, label, kind):
+    def _artifact_runner(writer, label, kind, agent) -> Runner:
         async def _run(task: str, channel_id: str | None) -> tuple[str, list]:
             project = await projects.ensure(channel_id) if projects is not None else None
+            proj_slug = project["slug"] if project else None
             dirpath = None
             if projects is not None and project is not None:
                 dirpath = projects.kind_dir(project["slug"], kind)
-            r = await writer.draft(task, dirpath=dirpath)
+            # Prime with relevant lessons from past jobs of this kind.
+            lessons = ""
+            if memory is not None and settings.lessons_enabled:
+                try:
+                    lessons = await memory.recall_lessons(task, kind=agent)
+                except Exception:  # noqa: BLE001 — recall must not break the job
+                    logger.exception("Lesson recall failed for %s", agent)
+            r = await writer.draft(task, dirpath=dirpath, lessons=lessons)
             rel = _rel(r["tex_path"])
             tag = f" (project: {project['name']})" if project else ""
             if projects is not None and project is not None and project.get("id"):
@@ -90,13 +100,21 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
                 {"type": "artifact", "tex": r["tex_path"], "bib": r["bib_path"],
                  "missing_citations": missing}
             ]
+            # Reflect the finished draft into durable lessons (background).
+            if memory is not None:
+                from ..memory.lessons import schedule_reflection
+
+                schedule_reflection(
+                    memory, agent, task, r.get("latex", ""),
+                    channel_id=channel_id, project=proj_slug,
+                )
             return summary, trace
 
         return _run
 
-    runners["literature_review"] = _artifact_runner(writers.reviewer, "literature review", "lit_review")
-    runners["methodology"] = _artifact_runner(writers.methodologist, "methodology", "methodology")
-    runners["paper_draft"] = _artifact_runner(writers.paper_writer, "paper draft", "paper")
+    runners["literature_review"] = _artifact_runner(writers.reviewer, "literature review", "lit_review", "literature_review")
+    runners["methodology"] = _artifact_runner(writers.methodologist, "methodology", "methodology", "methodology")
+    runners["paper_draft"] = _artifact_runner(writers.paper_writer, "paper draft", "paper", "paper_draft")
 
     if consortium is not None:
         async def _consortium(task: str, channel_id: str | None) -> tuple[str, list]:

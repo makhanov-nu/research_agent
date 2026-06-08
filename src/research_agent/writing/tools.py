@@ -8,6 +8,7 @@ project's existing lit review + methodology (+ experiment results) as material.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from langchain_core.runnables import RunnableConfig
@@ -15,6 +16,8 @@ from langchain_core.tools import BaseTool, tool
 
 from ..config import settings
 from ..projects import resolve_project
+
+logger = logging.getLogger(__name__)
 
 
 def _channel(config: RunnableConfig | None) -> str | None:
@@ -53,21 +56,36 @@ async def _gather_material(projects, project, limit: int = 6000) -> str:
     return "\n\n".join(chunks)
 
 
-def build_writing_tools(writers, task_store=None, projects=None) -> list[BaseTool]:
-    """Return writing tools bound to a `Writers` bundle and the project store."""
+def build_writing_tools(writers, task_store=None, projects=None, memory=None) -> list[BaseTool]:
+    """Return writing tools bound to a `Writers` bundle and the project store.
+
+    When `memory` is supplied each writer learns: it's primed with relevant
+    lessons from past jobs of the same kind, and the finished draft is reflected
+    into new lessons (in the background).
+    """
 
     async def _run(agent: str, kind: str, input_text: str, draft_coro_fn, config) -> str:
         project = await resolve_project(projects, config)
+        channel = _channel(config)
+        proj_slug = project["slug"] if project else None
         dirpath = None
         if projects is not None and project is not None:
             dirpath = projects.kind_dir(project["slug"], kind)
 
+        # Prime with relevant lessons from past jobs of this kind.
+        lessons = ""
+        if memory is not None and settings.lessons_enabled:
+            try:
+                lessons = await memory.recall_lessons(input_text, kind=agent)
+            except Exception:  # noqa: BLE001 — recall must not break the job
+                logger.exception("Lesson recall failed for %s", agent)
+
         task_id = None
         if task_store is not None:
-            task_id = await task_store.create(agent, input_text, _channel(config))
+            task_id = await task_store.create(agent, input_text, channel)
             await task_store.mark_running(task_id)
         try:
-            result = await draft_coro_fn(dirpath)
+            result = await draft_coro_fn(dirpath, lessons)
         except Exception as exc:  # noqa: BLE001
             if task_store is not None:
                 await task_store.fail(task_id, str(exc), [])
@@ -101,6 +119,15 @@ def build_writing_tools(writers, task_store=None, projects=None) -> list[BaseToo
                  "missing_citations": missing}
             ]
             await task_store.finish(task_id, summary, trace)
+
+        # Reflect the finished draft into durable lessons (background, best-effort).
+        if memory is not None:
+            from ..memory.lessons import schedule_reflection
+
+            schedule_reflection(
+                memory, agent, input_text, result.get("latex", ""),
+                channel_id=channel, project=proj_slug,
+            )
         return summary
 
     @tool
@@ -121,8 +148,9 @@ def build_writing_tools(writers, task_store=None, projects=None) -> list[BaseToo
         """
         return await _run(
             "literature_review", "lit_review", topic,
-            lambda d: writers.reviewer.draft(
-                topic, focus=focus, venue=venue, save_name=save_name, dirpath=d
+            lambda d, lessons: writers.reviewer.draft(
+                topic, focus=focus, venue=venue, save_name=save_name, dirpath=d,
+                lessons=lessons,
             ),
             config,
         )
@@ -145,8 +173,9 @@ def build_writing_tools(writers, task_store=None, projects=None) -> list[BaseToo
         """
         return await _run(
             "methodology", "methodology", idea,
-            lambda d: writers.methodologist.draft(
-                idea, constraints=constraints, venue=venue, save_name=save_name, dirpath=d
+            lambda d, lessons: writers.methodologist.draft(
+                idea, constraints=constraints, venue=venue, save_name=save_name,
+                dirpath=d, lessons=lessons,
             ),
             config,
         )
@@ -173,9 +202,9 @@ def build_writing_tools(writers, task_store=None, projects=None) -> list[BaseToo
         gathered = material or await _gather_material(projects, project)
         return await _run(
             "paper_draft", "paper", brief,
-            lambda d: writers.paper_writer.draft(
+            lambda d, lessons: writers.paper_writer.draft(
                 brief, material=gathered, sections=sections, venue=venue,
-                save_name=save_name, dirpath=d,
+                save_name=save_name, dirpath=d, lessons=lessons,
             ),
             config,
         )

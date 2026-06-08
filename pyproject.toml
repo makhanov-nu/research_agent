@@ -45,10 +45,21 @@ obs = [
     "arize-phoenix-otel>=0.5",
     "openinference-instrumentation-langchain>=0.1.29",
 ]
+train = [
+    # For the reference LoRA-per-role fine-tune (training/train_lora.py). Heavy
+    # GPU deps, only needed on the box where you actually train.
+    "torch>=2.2",
+    "transformers>=4.44",
+    "datasets>=2.20",
+    "peft>=0.12",
+    "trl>=0.9",
+    "accelerate>=0.33",
+]
 
 [project.scripts]
 research-agent = "research_agent.main:main"
 research-agent-web = "research_agent.web.main:main"
+research-agent-export = "research_agent.training.export:main"
 
 [build-system]
 requires = ["setuptools>=68"]

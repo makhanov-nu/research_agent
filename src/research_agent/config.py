@@ -5,6 +5,7 @@ from __future__ import annotations
 from urllib.parse import urlparse, unquote
 
 from dotenv import load_dotenv
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Populate os.environ from .env so SDKs that read the environment directly
@@ -70,6 +71,19 @@ class Settings(BaseSettings):
     archive_idle_days: int = 7
     # How often (seconds) the background maintenance loop runs.
     maintenance_interval_seconds: int = 6 * 60 * 60
+
+    # --- Self-improving lessons (the reflect-and-recall loop) ---
+    # Master switch: recall relevant lessons before each subagent job, and reflect
+    # the finished job into new lessons afterward.
+    lessons_enabled: bool = True
+    # How many past lessons to recall and inject into a job (top-K vector search).
+    lesson_recall_limit: int = Field(5, ge=1)
+    # Cheap model that distills a finished job into reusable lessons. Used only
+    # when OPENROUTER_API_KEY is set (build_reflection_llm); otherwise the default
+    # agent model is used. Runs once per job in the background, so keep it small.
+    reflection_model: str = "anthropic/claude-haiku-4.5"
+    # Max lessons to extract per job.
+    reflection_max_lessons: int = Field(3, ge=1)
 
     # --- Experiment compute node (registered via config) ---
     # SSH target for the GPU box. When host+user are empty, the runner is off.

@@ -9,11 +9,31 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from ..config import settings
 from .episodic import EpisodicStore
 from .procedural import ProceduralMemory
 from .semantic import SemanticMemory
 
 logger = logging.getLogger(__name__)
+
+_REFLECT_SYSTEM = (
+    "You are the reflection step of a self-improving research agent. A '{kind}' "
+    "subagent just finished a job. From the TASK and its RESULT, extract at most "
+    "{n} DURABLE, reusable lessons that would make the NEXT '{kind}' job better: "
+    "sources/datasets/methods that worked, pitfalls to avoid, effective structure "
+    "or phrasing, and any apparent user preferences. Each lesson must be one "
+    "self-contained sentence that GENERALIZES beyond this specific task — not a "
+    "summary of this result. If nothing is durably useful, reply with exactly "
+    "NONE. Output one lesson per line, no numbering or preamble."
+)
+
+
+def _flatten(content) -> str:
+    if isinstance(content, list):
+        return "".join(
+            b.get("text", "") if isinstance(b, dict) else str(b) for b in content
+        )
+    return content if isinstance(content, str) else str(content)
 
 
 class MemoryManager:
@@ -44,13 +64,64 @@ class MemoryManager:
 
         return "\n\n".join(sections)
 
-    async def recall_lessons(self, query: str, limit: int = 5) -> str:
-        """Recall consolidated lessons relevant to a task (e.g. past failures)."""
+    async def recall_lessons(
+        self, query: str, limit: int | None = None, *, kind: str | None = None
+    ) -> str:
+        """Recall consolidated lessons relevant to a task (e.g. past failures).
+
+        `kind` scopes recall to one agent's lessons (e.g. "literature") so a
+        worker is primed with its own past experience, not every agent's.
+        """
         if not (query and self.semantic.enabled):
             return ""
+        limit = limit or settings.lesson_recall_limit
         return await asyncio.to_thread(
-            self.semantic.recall, query, limit, "lesson"
+            self.semantic.recall, query, limit, "lesson", kind
         )
+
+    async def reflect_and_record(
+        self, agent_kind: str, task: str, result: str, *,
+        channel_id: str | None = None, project: str | None = None,
+    ) -> int:
+        """Distill durable lessons from a finished job and store them.
+
+        Runs a cheap reflection model over (task -> result); each extracted lesson
+        is recorded (episodic + semantic, tagged with `agent_kind` and `project`)
+        so future `recall_lessons(kind=agent_kind)` surfaces it. Returns the number
+        of lessons stored. Best-effort: never raises.
+        """
+        if not self.semantic.enabled or not (task and result):
+            return 0
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        from ..llm import build_reflection_llm
+
+        n_max = settings.reflection_max_lessons
+        system = _REFLECT_SYSTEM.format(kind=agent_kind, n=n_max)
+        human = f"TASK:\n{task[:2000]}\n\nRESULT:\n{result[:4000]}"
+        try:
+            resp = await build_reflection_llm().ainvoke(
+                [SystemMessage(content=system), HumanMessage(content=human)]
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Reflection LLM call failed for %s", agent_kind)
+            return 0
+
+        text = _flatten(resp.content).strip()
+        if not text or text.upper() == "NONE":
+            return 0
+        n = 0
+        for line in text.splitlines():
+            if n >= n_max:  # honor the cap (incl. 0) before persisting anything
+                break
+            lesson = line.strip(" \t-•*").rstrip()
+            if len(lesson) < 8 or lesson.upper() == "NONE":
+                continue
+            await self.record_lesson(
+                lesson, kind=agent_kind, channel_id=channel_id, project=project,
+            )
+            n += 1
+        return n
 
     async def record_lesson(
         self, text: str, *, kind: str, channel_id: str | None = None,
