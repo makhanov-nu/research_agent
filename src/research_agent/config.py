@@ -77,8 +77,9 @@ class Settings(BaseSettings):
     lessons_enabled: bool = True
     # How many past lessons to recall and inject into a job (top-K vector search).
     lesson_recall_limit: int = 5
-    # Cheap model that distills a finished job into reusable lessons (OpenRouter
-    # slug). Runs once per job in the background, so keep it small/cheap.
+    # Cheap model that distills a finished job into reusable lessons. Used only
+    # when OPENROUTER_API_KEY is set (build_reflection_llm); otherwise the default
+    # agent model is used. Runs once per job in the background, so keep it small.
     reflection_model: str = "anthropic/claude-haiku-4.5"
     # Max lessons to extract per job.
     reflection_max_lessons: int = 3

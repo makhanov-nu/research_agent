@@ -22,7 +22,9 @@ def build_delegated_tools(
     # Literature research subagent (owns the paperclip/MCP tools so the
     # orchestrator never sees raw search output). `memory` makes it learn.
     if mcp_tools:
-        tools.append(build_literature_agent_tool(llm, mcp_tools, task_store, memory))
+        tools.append(
+            build_literature_agent_tool(llm, mcp_tools, task_store, memory, projects)
+        )
 
     # LaTeX writers: literature review, methodology, paper draft (each a subagent).
     tools += build_writing_tools(

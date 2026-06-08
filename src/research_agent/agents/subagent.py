@@ -50,7 +50,7 @@ async def run_subagent(
     from ..memory.lessons import prime_with_lessons, schedule_reflection
     from .middleware import TaskRecorderMiddleware
 
-    primed = await prime_with_lessons(memory, agent_kind, task, project=project)
+    primed = await prime_with_lessons(memory, agent_kind, task)
     recorder = TaskRecorderMiddleware()
     agent = create_agent(
         model, tools, system_prompt=system_prompt, middleware=[recorder]
@@ -69,19 +69,24 @@ async def run_subagent(
 def build_subagent_tool(
     *, name: str, description: str, system_prompt: str, tools, model,
     task_store=None, recursion_limit: int = 40, memory=None,
-    agent_kind: str | None = None,
+    agent_kind: str | None = None, projects=None,
 ) -> BaseTool:
     """Build a delegation tool that runs a fresh, traced subagent per call.
 
     When `memory` is supplied the subagent learns: it's primed with past lessons
     (tagged `agent_kind`, defaulting to the tool name) and reflects each finished
-    job into new ones.
+    job into new ones — tagged with the channel's project (resolved via
+    `projects`) so lessons stay filterable, consistent with the background path.
     """
     kind = agent_kind or name
 
     @tool(name, description=description)
     async def _delegate(task: str, config: RunnableConfig = None) -> str:
+        from ..projects import resolve_project
+
         channel = _channel(config)
+        project = await resolve_project(projects, config)
+        proj_slug = project["slug"] if project else None
         task_id = None
         if task_store is not None:
             task_id = await task_store.create(name, task, channel)
@@ -91,6 +96,7 @@ def build_subagent_tool(
                 system_prompt=system_prompt, tools=tools, model=model,
                 task=task, recursion_limit=recursion_limit,
                 memory=memory, agent_kind=kind, channel_id=channel,
+                project=proj_slug,
             )
         except Exception as exc:  # noqa: BLE001 — report failure up, record it
             logger.exception("Subagent %s failed", name)

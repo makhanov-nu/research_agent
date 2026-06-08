@@ -58,7 +58,7 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
         except ValueError:
             return Path(path).name
 
-    def _artifact_runner(writer, label, kind, agent):
+    def _artifact_runner(writer, label, kind, agent) -> Runner:
         async def _run(task: str, channel_id: str | None) -> tuple[str, list]:
             project = await projects.ensure(channel_id) if projects is not None else None
             proj_slug = project["slug"] if project else None

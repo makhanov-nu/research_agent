@@ -162,7 +162,7 @@ async def test_prime_with_lessons_appends_relevant_block():
     from research_agent.memory.lessons import prime_with_lessons
 
     mem = _LoopMem("- prefer primary sources")
-    out = await prime_with_lessons(mem, "literature", "survey X", project="p1")
+    out = await prime_with_lessons(mem, "literature", "survey X")
     assert "survey X" in out
     assert "Lessons from past literature jobs" in out
     assert "prefer primary sources" in out
@@ -187,7 +187,11 @@ async def test_schedule_reflection_runs_in_background():
     schedule_reflection(
         mem, "literature", "task text", "result text", channel_id="c1", project="p1"
     )
-    await asyncio.sleep(0.01)  # let the fire-and-forget task run
+    # Poll for the fire-and-forget task instead of a fixed sleep (CI-robust).
+    for _ in range(200):  # up to ~1s
+        if mem.reflected:
+            break
+        await asyncio.sleep(0.005)
     assert mem.reflected == [("literature", "task text", "result text", "c1", "p1")]
 
 

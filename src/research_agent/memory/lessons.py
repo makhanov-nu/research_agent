@@ -28,9 +28,13 @@ logger = logging.getLogger(__name__)
 _pending: set[asyncio.Task] = set()
 
 
-async def prime_with_lessons(memory, agent_kind: str | None, task: str, *,
-                             project: str | None = None) -> str:
-    """Prepend relevant past lessons to a task. No-op without memory/lessons."""
+async def prime_with_lessons(memory, agent_kind: str | None, task: str) -> str:
+    """Prepend relevant past lessons to a task. No-op without memory/lessons.
+
+    Recall is global (kind-scoped, not project-scoped) by design — knowledge
+    compounds across projects; the `project` tag lives on the *stored* lesson for
+    optional filtering, not on recall.
+    """
     from ..config import settings
 
     if memory is None or not agent_kind or not settings.lessons_enabled:

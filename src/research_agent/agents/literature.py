@@ -22,7 +22,9 @@ _DESCRIPTION = (
 )
 
 
-def build_literature_agent_tool(model, lit_tools, task_store=None, memory=None) -> BaseTool:
+def build_literature_agent_tool(
+    model, lit_tools, task_store=None, memory=None, projects=None
+) -> BaseTool:
     return build_subagent_tool(
         name="research_literature",
         description=_DESCRIPTION,
@@ -32,6 +34,7 @@ def build_literature_agent_tool(model, lit_tools, task_store=None, memory=None) 
         task_store=task_store,
         memory=memory,
         agent_kind="literature",
+        projects=projects,
     )
 
 

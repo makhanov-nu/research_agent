@@ -524,24 +524,30 @@ class ResearchBot(discord.Client):
             return
 
         ok = await self.tasks.set_feedback(task_id, quality, note or None)
+        agent = task.get("agent") or "subagent"
+        banked = False
         if self.memory is not None:
-            project = (
-                await self.projects.get_by_channel(str(message.channel.id))
-                if self.projects is not None else None
-            )
-            verdict = "was good — reuse this approach" if quality == "good" else "needs correction"
-            lesson = (
-                f"[user feedback] A '{task['agent']}' result for "
-                f"\"{(task['input'] or '')[:160]}\" {verdict}."
-                + (f" Specifically: {note}" if note else "")
-            )
-            await self.memory.record_lesson(
-                lesson, kind=task["agent"], channel_id=str(message.channel.id),
-                status=quality, project=(project["slug"] if project else None),
-            )
+            try:
+                project = (
+                    await self.projects.get_by_channel(str(message.channel.id))
+                    if self.projects is not None else None
+                )
+                verdict = "was good — reuse this approach" if quality == "good" else "needs correction"
+                lesson = (
+                    f"[user feedback] A '{agent}' result for "
+                    f"\"{(task.get('input') or '')[:160]}\" {verdict}."
+                    + (f" Specifically: {note}" if note else "")
+                )
+                await self.memory.record_lesson(
+                    lesson, kind=agent, channel_id=str(message.channel.id),
+                    status=quality, project=(project["slug"] if project else None),
+                )
+                banked = True
+            except Exception:  # noqa: BLE001 — label is saved; banking a lesson is best-effort
+                logger.exception("Failed to bank feedback lesson for task #%s", task_id)
 
         if ok:
-            tail = " and banked a lesson for next time." if self.memory is not None else "."
+            tail = " and banked a lesson for next time." if banked else "."
             await message.channel.send(f"Logged **{quality}** feedback on task #{task_id}{tail}")
         else:
             await message.channel.send(f"Couldn't update task #{task_id}.")
