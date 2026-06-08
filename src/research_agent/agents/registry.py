@@ -20,12 +20,14 @@ def build_delegated_tools(
     tools: list[BaseTool] = []
 
     # Literature research subagent (owns the paperclip/MCP tools so the
-    # orchestrator never sees raw search output).
+    # orchestrator never sees raw search output). `memory` makes it learn.
     if mcp_tools:
-        tools.append(build_literature_agent_tool(llm, mcp_tools, task_store))
+        tools.append(build_literature_agent_tool(llm, mcp_tools, task_store, memory))
 
     # LaTeX writers: literature review, methodology, paper draft (each a subagent).
-    tools += build_writing_tools(writers, task_store=task_store, projects=projects)
+    tools += build_writing_tools(
+        writers, task_store=task_store, projects=projects, memory=memory
+    )
 
     # Multi-model ideation consortium.
     if consortium is not None:

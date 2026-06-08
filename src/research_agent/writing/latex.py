@@ -143,9 +143,15 @@ class LatexWriter:
         return flatten_content(messages[-1].content), messages
 
     async def _draft(
-        self, task: str, slug_source: str, save_name: str = "", dirpath=None
+        self, task: str, slug_source: str, save_name: str = "", dirpath=None,
+        lessons: str = "",
     ) -> dict:
-        text, messages = await self._generate(task)
+        primed = task if not lessons else (
+            f"{task}\n\n=== Lessons from past jobs "
+            "(apply these; avoid repeating past mistakes) ===\n"
+            f"{lessons}"
+        )
+        text, messages = await self._generate(primed)
         latex, bibtex, n_refs = parse_latex_artifact(text)
         missing = undefined_citations(latex, bibtex)
         name = timestamped(slugify(save_name or slug_source))

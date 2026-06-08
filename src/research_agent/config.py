@@ -71,6 +71,18 @@ class Settings(BaseSettings):
     # How often (seconds) the background maintenance loop runs.
     maintenance_interval_seconds: int = 6 * 60 * 60
 
+    # --- Self-improving lessons (the reflect-and-recall loop) ---
+    # Master switch: recall relevant lessons before each subagent job, and reflect
+    # the finished job into new lessons afterward.
+    lessons_enabled: bool = True
+    # How many past lessons to recall and inject into a job (top-K vector search).
+    lesson_recall_limit: int = 5
+    # Cheap model that distills a finished job into reusable lessons (OpenRouter
+    # slug). Runs once per job in the background, so keep it small/cheap.
+    reflection_model: str = "anthropic/claude-haiku-4.5"
+    # Max lessons to extract per job.
+    reflection_max_lessons: int = 3
+
     # --- Experiment compute node (registered via config) ---
     # SSH target for the GPU box. When host+user are empty, the runner is off.
     compute_ssh_host: str = ""

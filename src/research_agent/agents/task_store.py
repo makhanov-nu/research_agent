@@ -24,12 +24,17 @@ CREATE TABLE IF NOT EXISTS tasks (
     result       TEXT,
     trace        JSONB NOT NULL DEFAULT '[]'::jsonb,
     error        TEXT,
+    quality      TEXT,            -- user verdict: good|bad (the training label)
+    feedback     TEXT,            -- the user's correction/note, if any
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     started_at   TIMESTAMPTZ,
     finished_at  TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS tasks_channel_idx ON tasks (channel_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS tasks_status_idx ON tasks (status);
+-- Backfill the label columns on installs created before this change.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS quality TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS feedback TEXT;
 """
 
 
@@ -96,6 +101,24 @@ class TaskStore:
         async with self.pool.connection() as conn:
             cur = await conn.execute("SELECT * FROM tasks WHERE id=%s", (task_id,))
             return await cur.fetchone()
+
+    async def set_feedback(
+        self, task_id: int, quality: str, feedback: str | None = None
+    ) -> bool:
+        """Attach a user verdict (good|bad) + optional note to a task.
+
+        This is the training-quality label: it turns the logged (input, result,
+        trace) into a labeled example for later fine-tuning/distillation, and
+        lets you filter the corpus to only the trajectories you approved.
+        """
+        if not self.enabled:
+            return False
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE tasks SET quality=%s, feedback=%s WHERE id=%s RETURNING id",
+                (quality, feedback, task_id),
+            )
+            return await cur.fetchone() is not None
 
     async def list_recent(self, limit: int = 15, channel_id: str | None = None) -> list[dict]:
         if not self.enabled:

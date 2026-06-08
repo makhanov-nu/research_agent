@@ -109,7 +109,7 @@ async def test_build_runners_route_artifacts_into_project(tmp_path):
     from research_agent.projects.store import ProjectStore
 
     class _FakeWriter:
-        async def draft(self, task, dirpath=None):
+        async def draft(self, task, dirpath=None, lessons=""):
             p = dirpath / "out.tex"
             p.write_text("\\section{X}")
             return {"tex_path": str(p), "bib_path": "", "n_refs": 0, "latex": ""}

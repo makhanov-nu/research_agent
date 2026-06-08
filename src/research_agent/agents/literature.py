@@ -22,7 +22,7 @@ _DESCRIPTION = (
 )
 
 
-def build_literature_agent_tool(model, lit_tools, task_store=None) -> BaseTool:
+def build_literature_agent_tool(model, lit_tools, task_store=None, memory=None) -> BaseTool:
     return build_subagent_tool(
         name="research_literature",
         description=_DESCRIPTION,
@@ -30,15 +30,18 @@ def build_literature_agent_tool(model, lit_tools, task_store=None) -> BaseTool:
         tools=lit_tools,
         model=model,
         task_store=task_store,
+        memory=memory,
+        agent_kind="literature",
     )
 
 
-def build_literature_runner(model, lit_tools):
+def build_literature_runner(model, lit_tools, memory=None):
     """A bare runner (task -> (result, trace)) for the background dispatcher."""
 
-    async def _run(task: str) -> tuple[str, list]:
+    async def _run(task: str, channel_id: str | None = None) -> tuple[str, list]:
         return await run_subagent(
-            system_prompt=_SYSTEM, tools=lit_tools, model=model, task=task
+            system_prompt=_SYSTEM, tools=lit_tools, model=model, task=task,
+            memory=memory, agent_kind="literature", channel_id=channel_id,
         )
 
     return _run

@@ -68,3 +68,17 @@ def build_openrouter_chat(
         api_key=settings.openrouter_api_key or None,
         base_url=settings.openrouter_base_url,
     )
+
+
+def build_reflection_llm() -> BaseChatModel:
+    """Cheap model for the per-job reflection step (lesson distillation).
+
+    Prefers a small OpenRouter model (independent of the agent's provider) so the
+    once-per-job reflection stays cheap; falls back to the default agent model
+    when OpenRouter isn't configured.
+    """
+    if settings.openrouter_api_key:
+        return build_openrouter_chat(
+            settings.reflection_model, temperature=0.2, max_tokens=512
+        )
+    return get_llm()

@@ -47,6 +47,8 @@ HELP_TEXT = (
     "`!tasks` — recent subagent tasks (the dashboard)\n"
     "`!task <id>` — a task's status + result\n"
     "`!trace <id>` — export a task's full trace (reasoning + tool calls) as a file\n"
+    "`!feedback <id> <good|bad> [note]` — rate a task; I bank it as a lesson and "
+    "a training label\n"
     "`!help` — this message\n\n"
     "Otherwise, just talk to me — DM or @-mention."
 )
@@ -421,6 +423,8 @@ class ResearchBot(discord.Client):
             await self._ideate(message, arg.strip())
         elif cmd in {"tasks", "task", "trace"}:
             await self._handle_task_command(message, cmd, arg.strip())
+        elif cmd == "feedback":
+            await self._handle_feedback(message, arg.strip())
         elif cmd == "project":
             await self._handle_project_command(message, arg.strip())
         else:
@@ -496,6 +500,51 @@ class ResearchBot(discord.Client):
             f"Exported trace for task #{task['id']} "
             f"({len(task.get('trace') or [])} steps): `!getfile traces/{out.name}`"
         )
+
+    async def _handle_feedback(self, message, arg) -> None:
+        """`!feedback <task_id> <good|bad> [note]` — label a task + bank a lesson.
+
+        The verdict becomes a training-quality label on the task row, and (when
+        memory is on) a high-signal lesson tagged by the task's agent kind, so
+        future jobs of that kind are primed with your correction.
+        """
+        if self.tasks is None:
+            await message.channel.send("The task dashboard isn't configured (needs the DB).")
+            return
+        parts = arg.split(maxsplit=2)
+        if len(parts) < 2 or not parts[0].isdigit() or parts[1].lower() not in {"good", "bad"}:
+            await message.channel.send("Usage: `!feedback <task_id> <good|bad> [note]`")
+            return
+        task_id, quality = int(parts[0]), parts[1].lower()
+        note = parts[2].strip() if len(parts) > 2 else ""
+
+        task = await self.tasks.get(task_id)
+        if task is None:
+            await message.channel.send(f"No task #{task_id}.")
+            return
+
+        ok = await self.tasks.set_feedback(task_id, quality, note or None)
+        if self.memory is not None:
+            project = (
+                await self.projects.get_by_channel(str(message.channel.id))
+                if self.projects is not None else None
+            )
+            verdict = "was good — reuse this approach" if quality == "good" else "needs correction"
+            lesson = (
+                f"[user feedback] A '{task['agent']}' result for "
+                f"\"{(task['input'] or '')[:160]}\" {verdict}."
+                + (f" Specifically: {note}" if note else "")
+            )
+            await self.memory.record_lesson(
+                lesson, kind=task["agent"], channel_id=str(message.channel.id),
+                status=quality, project=(project["slug"] if project else None),
+            )
+
+        if ok:
+            tail = " and banked a lesson for next time." if self.memory is not None else "."
+            await message.channel.send(f"Logged **{quality}** feedback on task #{task_id}{tail}")
+        else:
+            await message.channel.send(f"Couldn't update task #{task_id}.")
 
     async def _ideate(self, message, arg) -> None:
         """`!ideate <topic>` opens a session; `!ideate done` finalizes; `!ideate cancel` drops it."""
