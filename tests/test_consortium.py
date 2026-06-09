@@ -176,13 +176,16 @@ async def test_capture_council_records_experience_and_lesson():
             self.exp, self.lessons = [], []
 
         async def log_experience(self, kind, summary, channel_id=None, metadata=None):
-            self.exp.append((kind, channel_id))
+            self.exp.append((kind, summary, channel_id, metadata))
 
         async def record_lesson(self, text, *, kind, channel_id=None, **kw):
-            self.lessons.append((kind, text))
+            self.lessons.append((kind, text, channel_id))
 
     mem = _Mem()
     await capture_council(mem, "chan-1", "specdec", "the ideas", "ideas/x.md", rounds=2)
     assert mem.exp and mem.exp[0][0] == "council_session"
-    assert mem.lessons and mem.lessons[0][0] == "council"
+    assert "converged after 2 round(s)" in mem.exp[0][1]
+    assert mem.exp[0][2] == "chan-1"
+    assert mem.exp[0][3] == {"topic": "specdec", "rel_path": "ideas/x.md"}
+    assert mem.lessons and mem.lessons[0][0] == "council" and mem.lessons[0][2] == "chan-1"
     await capture_council(None, "c", "t", "i")  # no-op without memory

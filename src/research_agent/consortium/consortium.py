@@ -52,7 +52,7 @@ def parse_ideas(text: str, max_n: int = 3) -> list[str]:
     An error sentinel (``[... could not respond ...]``) yields no ideas.
     """
     text = (text or "").strip()
-    if not text or text.startswith("[") and "could not" in text[:80]:
+    if not text or (text.startswith("[") and "could not" in text[:80]):
         return []
     parts = [p.strip() for p in _IDEA_SPLIT.split(text) if p.strip()]
     return parts[:max_n]
@@ -115,13 +115,13 @@ def normalize_and_rank(pool: list[dict], scores_by_model: dict[str, dict[int, fl
             mean, std = stats[model]
             raws.append(raw)
             norms.append((raw - mean) / std if std > 0 else 0.0)
-        idea = {
+        enriched = {
             **idea,
             "score": round(sum(raws) / len(raws), 2) if raws else 0.0,
             "score_norm": sum(norms) / len(norms) if norms else 0.0,
             "n_scores": len(raws),
         }
-        ranked.append(idea)
+        ranked.append(enriched)
     ranked.sort(key=lambda i: (i["score_norm"], i["score"]), reverse=True)
     return ranked
 
@@ -309,7 +309,7 @@ class Consortium:
             for m in self.panel
         ))
         ideas, trace = [], []
-        for model, (text, msgs) in zip(self.panel, results):
+        for model, (text, msgs) in zip(self.panel, results, strict=True):
             trace += _collect(f"{model}:propose", msgs)
             for body in parse_ideas(text, max_n=3):
                 ideas.append({"text": body, "source": "independent", "by": model})
@@ -335,7 +335,7 @@ class Consortium:
             self._agent_say(m, _panel_system(m, shared=True), _DEBATE_EXTRACT, transcript)
             for m in self.panel
         ))
-        for model, (text, msgs) in zip(self.panel, extracts):
+        for model, (text, msgs) in zip(self.panel, extracts, strict=True):
             trace += _collect(f"{model}:extract", msgs)
             picked = parse_ideas(text, max_n=1)
             if picked:
@@ -352,7 +352,7 @@ class Consortium:
         ))
         scores: dict[str, dict[int, float]] = {}
         trace: list = []
-        for model, (text, msgs) in zip(self.panel, results):
+        for model, (text, msgs) in zip(self.panel, results, strict=True):
             trace += _collect(f"{model}:score", msgs)
             parsed = parse_scores(text, valid)
             if parsed:
@@ -375,7 +375,7 @@ class Consortium:
             for m in self.panel
         ))
         proposals, trace = [], []
-        for model, (text, msgs) in zip(self.panel, indep):
+        for model, (text, msgs) in zip(self.panel, indep, strict=True):
             trace += _collect(f"{model}:polish", msgs)
             if text and not text.startswith("["):
                 proposals.append({"text": text, "source": "independent", "by": model})
@@ -485,7 +485,10 @@ class ConsortiumSession:
         follow-up round to re-polish the same selection with new `comments`.
         """
         if picks is not None:
-            self.selected = [i for i in self.top if i["id"] in set(picks)] or self.top[:1]
+            matched = [i for i in self.top if i["id"] in set(picks)]
+            if not matched:
+                logger.warning("No ideas matched picks %s; using the top idea.", picks)
+            self.selected = matched or self.top[:1]
         chosen = self.selected or self.top[:1]
         self.round_no += 1
         prior = await self._prior()

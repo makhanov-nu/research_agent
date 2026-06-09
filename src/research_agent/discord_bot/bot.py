@@ -606,16 +606,18 @@ class ResearchBot(discord.Client):
                 await message.channel.send("Nothing to refine yet — pick ideas from a round-1 top-5 first.")
             return
         if sub == "pick":
-            if session is not None and session.phase == "scored" and _parse_picks(rest):
-                await self._consortium_polish(message, session, picks=_parse_picks(rest))
+            picks = _parse_picks(rest)
+            if session is not None and session.phase == "scored" and picks:
+                await self._consortium_polish(message, session, picks=picks)
             else:
                 await message.channel.send("`!ideate pick <numbers>` works on a round-1 top-5.")
             return
 
         # An active session: route by phase.
         if session is not None and not session.finalized:
-            if session.phase == "scored" and _parse_picks(arg):
-                await self._consortium_polish(message, session, picks=_parse_picks(arg))
+            picks = _parse_picks(arg)
+            if session.phase == "scored" and picks:
+                await self._consortium_polish(message, session, picks=picks)
             else:
                 await message.channel.send(self._ideate_hint(session))
             return
@@ -664,7 +666,7 @@ class ResearchBot(discord.Client):
             "Reply with the numbers to develop (e.g. `2,4`), or `!ideate done` to finalize."
         )
 
-    async def _consortium_polish(self, message, session, picks, comments: str = "") -> None:
+    async def _consortium_polish(self, message, session, picks: list[int] | None, comments: str = "") -> None:
         if session.busy:
             await message.channel.send("The panel is still deliberating — one moment…")
             return
