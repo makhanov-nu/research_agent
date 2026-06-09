@@ -1,9 +1,12 @@
-"""Ideation consortium: a shared multi-model round-table debate.
+"""Ideation consortium: a two-track, scored multi-model panel.
 
-Several frontier models (via OpenRouter) discuss in one shared session — each
-reads the running transcript before speaking, so they hear and react to each
-other — through propose -> debate -> chair synthesis, converging on a few
-Q1-level research ideas grounded in the literature.
+Frontier reasoning models (via OpenRouter) generate ideas through two isolated
+tracks — an INDEPENDENT track (each works alone, for diversity) and a DEBATED
+track (a separate shared conversation, for emergent synthesis). The merged,
+anonymized pool is scored 0-10 by every panelist under an anti-neutrality rubric;
+the chair ranks them (normalizing across raters) into a top 5. The researcher
+picks; the panel then polishes the chosen idea(s) on both tracks and votes. The
+debate transcripts are saved so future sessions' debate track recalls them.
 """
 
 from .consortium import Consortium, ConsortiumSession

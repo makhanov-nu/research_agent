@@ -1,31 +1,70 @@
-"""Tests for the consortium's shared-transcript helpers and config."""
+"""Tests for the two-track scored consortium: pure helpers + session flow."""
 
 from __future__ import annotations
 
 from research_agent.config import settings
-from research_agent.consortium.consortium import build_document, render_transcript
+from research_agent.consortium import capture_council
+from research_agent.consortium.consortium import (
+    Consortium,
+    build_document,
+    idea_synopsis,
+    normalize_and_rank,
+    parse_ideas,
+    parse_scores,
+    render_transcript,
+)
 
 
-def test_render_transcript_empty():
+# --- pure helpers ------------------------------------------------------------
+
+def test_parse_ideas_splits_on_marker_and_caps():
+    text = (
+        "=== IDEA ===\nFirst\n=== IDEA ===\nSecond\n"
+        "=== IDEA ===\nThird\n=== IDEA ===\nFourth"
+    )
+    assert parse_ideas(text, max_n=3) == ["First", "Second", "Third"]
+
+
+def test_parse_ideas_fallback_and_error_sentinel():
+    assert parse_ideas("one idea, no marker") == ["one idea, no marker"]
+    assert parse_ideas("[deepseek/x could not respond: boom]") == []
+    assert parse_ideas("") == []
+
+
+def test_parse_scores_prefers_json_filters_and_clamps():
+    # ids outside the pool are dropped; scores clamp to [0, 10].
+    assert parse_scores('{"1": 8, "2": 3, "9": 5}', {1, 2}) == {1: 8.0, 2: 3.0}
+    assert parse_scores('{"1": 99, "2": -4}', {1, 2}) == {1: 10.0, 2: 0.0}
+
+
+def test_parse_scores_falls_back_to_lines():
+    assert parse_scores("#1: 7\n#2 - 4", {1, 2}) == {1: 7.0, 2: 4.0}
+
+
+def test_normalize_and_rank_normalizes_across_raters():
+    pool = [{"id": 1, "text": "a"}, {"id": 2, "text": "b"}, {"id": 3, "text": "c"}]
+    scores = {
+        "lenient": {1: 9, 2: 8, 3: 10},  # everything high
+        "harsh": {1: 2, 2: 1, 3: 4},     # everything low
+    }
+    ranked = normalize_and_rank(pool, scores)
+    # idea 3 is best for both raters -> rank 1; idea 2 worst -> last.
+    assert [i["id"] for i in ranked] == [3, 1, 2]
+    assert ranked[0]["score"] == 7.0  # raw mean of 10 and 4
+    assert ranked[0]["n_scores"] == 2
+
+
+def test_idea_synopsis_and_document():
+    assert idea_synopsis("short") == "short"
+    assert idea_synopsis("x " * 500, limit=20).endswith("…")
+    doc = build_document("T", [("Top", "the idea"), ("Round 1 — idea debate", "the talk")])
+    assert "# Research ideas — T" in doc
+    assert "## Top" in doc and "the idea" in doc and "idea debate" in doc
+
+
+def test_render_transcript_empty_and_labeled():
     assert render_transcript([]) == "(no discussion yet)"
-
-
-def test_render_transcript_labels_speakers():
-    out = render_transcript([("openai/gpt-5.5", "idea A"), ("deepseek/r1", "counter")])
-    assert "[openai/gpt-5.5]:" in out
-    assert "idea A" in out
-    assert "[deepseek/r1]:" in out
-    # speakers appear in order
-    assert out.index("gpt-5.5") < out.index("deepseek/r1")
-
-
-def test_build_document_contains_final_and_transcript():
-    transcript = [("Background (literature)", "gaps..."), ("modelX", "proposal")]
-    doc = build_document("my topic", "## 3 ideas", transcript)
-    assert "# Research ideas — my topic" in doc
-    assert "## 3 ideas" in doc
-    assert "Full panel discussion" in doc
-    assert "[modelX]:" in doc
+    assert "[m/a]:" in render_transcript([("m/a", "hi")])
 
 
 def test_panel_models_parsing(monkeypatch):
@@ -33,55 +72,108 @@ def test_panel_models_parsing(monkeypatch):
     assert settings.panel_models == ["a/x", "b/y", "c/z"]
 
 
-# --- session flow (fakes, no LLM) --------------------------------------------
-
-import pytest
-
-from research_agent.consortium.consortium import Consortium
-
+# --- session flow (fakes: phase methods stubbed, no LLM) ---------------------
 
 class _FakeConsortium(Consortium):
-    """Records calls and returns canned text instead of hitting any model."""
+    """Stubs the phase methods so the state machine can be tested without models."""
 
     def __init__(self, tmp_path):
-        super().__init__([], ["m/a", "m/b"], "chair/x", str(tmp_path))
-        self.said: list[tuple[str, str]] = []
+        super().__init__([], ["m/a", "m/b", "m/c", "m/d"], "chair/x", str(tmp_path))
 
-    async def _agent_say(self, model, instruction, transcript):
-        self.said.append((model, instruction))
-        # Real contract is (reply_text, message_history); fakes carry no history.
-        return f"{model} says something", []
+    async def make_brief(self, topic, focus=""):
+        return f"brief for {topic}", []
+
+    async def propose_independent(self, brief):
+        ideas = [
+            {"text": f"{m} idea {k}", "source": "independent", "by": m}
+            for m in self.panel for k in (1, 2, 3)
+        ]
+        return ideas, []
+
+    async def debate_ideas(self, brief, prior=""):
+        ideas = [{"text": f"{m} debated", "source": "debated", "by": m} for m in self.panel]
+        return ideas, [("Brief", brief), ("m/a", "...")], []
+
+    async def score_pool(self, pool, instruction=None):
+        # Lower id -> higher score, so ranking is deterministic.
+        scores = {m: {i["id"]: max(0, 10 - i["id"]) for i in pool} for m in self.panel}
+        return scores, []
+
+    async def vote_pool(self, pool):
+        return await self.score_pool(pool)
+
+    async def polish_idea(self, idea_text, instructions, prior=""):
+        indep = [
+            {"text": f"{m} polished {idea_text[:6]}", "source": "independent", "by": m}
+            for m in self.panel
+        ]
+        debated = {"text": f"debated polish {idea_text[:6]}", "source": "debated", "by": "panel"}
+        return indep, debated, [("x", "y")], []
 
 
-@pytest.mark.asyncio
-async def test_session_round_collects_each_panelist(tmp_path):
-    c = _FakeConsortium(tmp_path)
-    session = c.new_session("topic")
-    digest = await session.run_round()
-    assert [m for m, _ in c.said] == ["m/a", "m/b"]  # each spoke once, in order
-    assert session.round_no == 1
-    assert "m/a says something" in digest and "m/b says something" in digest
+async def test_round1_pools_16_ideas_and_returns_top5(tmp_path):
+    session = _FakeConsortium(tmp_path).new_session("topic")
+    top = await session.run_round1()
+
+    assert len(session.pool) == 16                      # 12 independent + 4 debated
+    assert {i["id"] for i in session.pool} == set(range(1, 17))
+    assert {i["source"] for i in session.pool} == {"independent", "debated"}
+    assert [i["id"] for i in top] == [1, 2, 3, 4, 5]    # lower id scored higher
+    assert session.phase == "scored"
+    assert all("score" in i for i in top)
 
 
-@pytest.mark.asyncio
-async def test_session_feedback_enters_transcript_and_next_round(tmp_path):
-    c = _FakeConsortium(tmp_path)
-    session = c.new_session("topic")
-    await session.run_round()
-    await session.run_round(feedback="focus on efficiency")
-    speakers = [s for s, _ in session.transcript]
-    assert "Researcher (you)" in speakers
+async def test_select_and_polish_votes_and_caps_to_5(tmp_path):
+    session = _FakeConsortium(tmp_path).new_session("topic")
+    await session.run_round1()
+    top = await session.select_and_polish(picks=[1, 2])
+
+    # 2 ideas × (4 independent + 1 debated) = 10 proposals -> capped to top 5.
+    assert len(session.pool) == 10
+    assert len(top) == 5
+    assert session.phase == "polished"
     assert session.round_no == 2
+    assert [i["id"] for i in session.selected] == [1, 2]  # selection remembered
 
 
-@pytest.mark.asyncio
+async def test_again_reuses_selection(tmp_path):
+    session = _FakeConsortium(tmp_path).new_session("topic")
+    await session.run_round1()
+    await session.select_and_polish(picks=[3])
+    assert [i["id"] for i in session.selected] == [3]
+    # 1 idea -> 5 proposals (<=5) -> all returned.
+    assert len(session.top) == 5
+
+    await session.select_and_polish(picks=None, comments="go deeper on proofs")
+    assert [i["id"] for i in session.selected] == [3]     # unchanged
+    assert session.round_no == 3
+
+
+async def test_finalize_saves_document_with_debate(tmp_path):
+    session = _FakeConsortium(tmp_path).new_session("my topic")
+    await session.run_round1()
+    result = await session.finalize()
+
+    assert session.finalized and result["rounds"] == 1
+    assert result["top"] == session.top
+    saved = next((tmp_path / "ideas").glob("*.md")).read_text()
+    assert "# Research ideas — my topic" in saved
+    assert "idea debate" in saved.lower()                 # debate transcript persisted
+
+
+async def test_ideate_runs_round1_only_non_interactive(tmp_path):
+    result = await _FakeConsortium(tmp_path).ideate("topic")
+    assert result["rounds"] == 1
+    assert len(result["top"]) == 5
+    assert result["rel_path"].startswith("ideas/")
+
+
+# --- memory capture ----------------------------------------------------------
+
 async def test_capture_council_records_experience_and_lesson():
-    from research_agent.consortium import capture_council
-
     class _Mem:
         def __init__(self):
-            self.exp = []
-            self.lessons = []
+            self.exp, self.lessons = [], []
 
         async def log_experience(self, kind, summary, channel_id=None, metadata=None):
             self.exp.append((kind, channel_id))
@@ -90,52 +182,7 @@ async def test_capture_council_records_experience_and_lesson():
             self.lessons.append((kind, text))
 
     mem = _Mem()
-    await capture_council(mem, "chan-1", "specdec", "the validated idea", "ideas/x.md", rounds=2)
+    await capture_council(mem, "chan-1", "specdec", "the ideas", "ideas/x.md", rounds=2)
     assert mem.exp and mem.exp[0][0] == "council_session"
     assert mem.lessons and mem.lessons[0][0] == "council"
-    # no-op without a memory manager
-    await capture_council(None, "c", "t", "i")
-
-
-@pytest.mark.asyncio
-async def test_session_finalize_saves_document(tmp_path):
-    c = _FakeConsortium(tmp_path)
-    session = c.new_session("my topic")
-    await session.run_round()
-    result = await session.finalize()
-    assert session.finalized and result["rounds"] == 1
-    # The dashboard trace is always present (empty here: the fakes carry no history).
-    assert result["trace"] == []
-    saved = next((tmp_path / "ideas").glob("*.md"))
-    assert "# Research ideas — my topic" in saved.read_text()
-
-
-@pytest.mark.asyncio
-async def test_session_accumulates_reasoning_trace(tmp_path):
-    """Panelist + chair turns (with tool calls) are folded into the trace."""
-    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-
-    class _TracingConsortium(Consortium):
-        def __init__(self, tmp_path):
-            super().__init__([], ["m/a", "m/b"], "chair/x", str(tmp_path))
-
-        async def _agent_say(self, model, instruction, transcript):
-            ai = AIMessage(
-                content="",
-                tool_calls=[{"name": "search", "args": {"q": "x"}, "id": "tc1"}],
-            )
-            tool = ToolMessage(content="a result", tool_call_id="tc1", name="search")
-            final = AIMessage(content=f"{model} proposes")
-            # Leading human prompt should be dropped from the collected trace.
-            return f"{model} proposes", [HumanMessage(content="prompt"), ai, tool, final]
-
-    c = _TracingConsortium(tmp_path)
-    session = c.new_session("topic")
-    await session.run_round()  # two panelists
-    result = await session.finalize()  # + chair
-    trace = result["trace"]
-    # No prompt-echo steps survive; every step is tagged with its speaker.
-    assert all(s["type"] != "human" for s in trace)
-    assert {s["speaker"] for s in trace} == {"m/a", "m/b", "chair"}
-    # The literature tool call is captured.
-    assert any(s.get("tool_calls") for s in trace)
+    await capture_council(None, "c", "t", "i")  # no-op without memory

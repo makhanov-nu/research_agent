@@ -180,16 +180,19 @@ class Settings(BaseSettings):
     def web_is_https(self) -> bool:
         return self.web_redirect_uri.startswith("https") or self.web_base_url.startswith("https")
 
-    # --- Ideation consortium (multi-model debate via OpenRouter) ---
-    # Comma-separated OpenRouter model slugs forming the panel.
+    # --- Ideation consortium (two-track scored panel via OpenRouter) ---
+    # Comma-separated OpenRouter slugs for the panel — latest reasoning models.
+    # (Verify exact slugs on https://openrouter.ai/models.)
     consortium_models: str = (
-        "anthropic/claude-opus-4.7,openai/gpt-5.5,"
-        "google/gemini-3-pro,deepseek/deepseek-r1"
+        "deepseek/deepseek-v4-pro,z-ai/glm-5.1,"
+        "qwen/qwen3.7-plus,moonshotai/kimi-k2.6"
     )
-    # The model that synthesizes the final ideas.
-    consortium_chair_model: str = "anthropic/claude-opus-4.7"
+    # The chair: builds the brief, ranks the scores, leads the polish debate.
+    consortium_chair_model: str = "anthropic/claude-opus-4.8"
     consortium_temperature: float = 0.6
-    # Number of debate rounds after the opening proposals.
+    # Turns in the shared debate track (turn 1 opens, the rest react).
+    consortium_debate_turns: int = 2
+    # Back-compat (unused by the two-track flow).
     consortium_rounds: int = 1
 
     @property
