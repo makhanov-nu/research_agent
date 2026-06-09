@@ -48,13 +48,19 @@ def _flatten(content) -> str:
 def parse_ideas(text: str, max_n: int = 3) -> list[str]:
     """Split a panelist's output into idea blocks on the IDEA_MARKER.
 
-    Falls back to the whole text as a single idea when the marker is absent.
-    An error sentinel (``[... could not respond ...]``) yields no ideas.
+    Any preamble before the first marker is dropped (models routinely prefix a
+    "Sure, here are my ideas:"), so it never masquerades as idea #1. Falls back to
+    the whole text as a single idea when the marker is absent; an error sentinel
+    (``[... could not respond ...]``) yields no ideas.
     """
     text = (text or "").strip()
     if not text or (text.startswith("[") and "could not" in text[:80]):
         return []
-    parts = [p.strip() for p in _IDEA_SPLIT.split(text) if p.strip()]
+    if IDEA_MARKER.lower() in text.lower():
+        # split()[1:] discards the segment before the first marker (the preamble).
+        parts = [p.strip() for p in _IDEA_SPLIT.split(text)[1:] if p.strip()]
+    else:
+        parts = [text]
     return parts[:max_n]
 
 

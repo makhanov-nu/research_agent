@@ -25,6 +25,14 @@ def test_parse_ideas_splits_on_marker_and_caps():
     assert parse_ideas(text, max_n=3) == ["First", "Second", "Third"]
 
 
+def test_parse_ideas_drops_preamble_before_first_marker():
+    # A model's "Sure, here are my ideas:" preamble must NOT become idea #1.
+    text = "Sure, here you go:\n=== IDEA ===\nA\n=== IDEA ===\nB\n=== IDEA ===\nC"
+    assert parse_ideas(text, max_n=3) == ["A", "B", "C"]
+    # The single-extract (debate) path returns the idea, not the preamble.
+    assert parse_ideas("My best:\n=== IDEA ===\nThe Idea", max_n=1) == ["The Idea"]
+
+
 def test_parse_ideas_fallback_and_error_sentinel():
     assert parse_ideas("one idea, no marker") == ["one idea, no marker"]
     assert parse_ideas("[deepseek/x could not respond: boom]") == []
