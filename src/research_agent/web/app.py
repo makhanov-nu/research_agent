@@ -15,6 +15,15 @@ from pathlib import Path
 from ..config import settings
 from . import auth
 
+# Imported at module scope so the name lands in THIS module's globals, where
+# FastAPI's get_type_hints() can resolve the string annotation `request: Request`
+# on the endpoints defined inside create_app(). Under `from __future__ import
+# annotations` (PEP 563) those annotations are stored as the bare string
+# "Request"; if the name isn't a module global, resolution fails and FastAPI
+# misclassifies `request` as a required *query* param -> 422 on /phoenix/* and
+# /api/tasks/stream. Keep the noqa: it's referenced only inside those annotations.
+from starlette.requests import Request  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,7 +51,7 @@ def _file_tree(base: Path) -> list[dict]:
 
 
 def create_app():
-    from fastapi import Depends, FastAPI, HTTPException, Query, Request
+    from fastapi import Depends, FastAPI, HTTPException, Query
     from fastapi.responses import (
         FileResponse,
         JSONResponse,
