@@ -164,9 +164,14 @@ def _panel_system(model: str, shared: bool) -> str:
     return (
         f"You are {model}, a frontier reasoning model on a research ideation panel. "
         f"{mode}\n\n"
-        "Tools: scientific literature search (paperclip) and web search (Tavily). "
-        "SEARCH before claiming novelty or SOTA — verify, never invent citations "
-        "(use real arXiv id / DOI / URL).\n\n"
+        "Tools available:\n"
+        "• paperclip (literature search) — pass a CLI string; the -s source flag is REQUIRED.\n"
+        "  Usage: search -s <source> \"query\"   where source ∈ {arxiv, pmc, biorxiv, medrxiv}\n"
+        "  Examples: search -s arxiv \"few-shot image classification\"\n"
+        "            search -s pmc \"medical image segmentation transformer\"\n"
+        "  For biomedical/clinical work search both arxiv AND pmc.\n"
+        "• Tavily (web search) — for conference CFPs, blog posts, and non-paper sources.\n"
+        "SEARCH before claiming novelty or SOTA — verify citations; use real arXiv ids / DOIs.\n\n"
         "Be rigorous and concrete: give the mathematical formulation (LaTeX) and a "
         "theoretical justification or proof sketch where it matters, and for every "
         "proposed improvement state WHAT to change, WHERE, and WHY."
@@ -282,6 +287,7 @@ class Consortium:
         agent = create_react_agent(
             build_openrouter_chat(model, self.temperature, max_tokens=6000),
             self.tools, prompt=system,
+            handle_tool_errors=True,
         )
         if transcript:
             content = f"Debate so far:\n\n{render_transcript(transcript)}\n\n---\n{instruction}"
