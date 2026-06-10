@@ -199,6 +199,10 @@ def create_app():
         "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
         "te", "trailers", "transfer-encoding", "upgrade", "content-encoding",
         "content-length",
+        # Strip accept-encoding so Phoenix returns uncompressed bytes; the proxy
+        # buffers the full response and would otherwise strip content-encoding
+        # while passing compressed bytes through, rendering blank in the browser.
+        "accept-encoding",
     }
 
     @app.api_route(
