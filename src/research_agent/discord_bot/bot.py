@@ -362,6 +362,12 @@ class ResearchBot(discord.Client):
             await self._notify_channel(channel_id, reply)
 
     async def on_message(self, message: discord.Message) -> None:
+        try:
+            await self._handle_message(message)
+        finally:
+            self._msg_dest.pop(message.id, None)
+
+    async def _handle_message(self, message: discord.Message) -> None:
         if message.author == self.user or message.author.bot:
             return
 
@@ -621,6 +627,24 @@ class ResearchBot(discord.Client):
             logger.exception("PDF extraction failed")
             return ""
 
+    @staticmethod
+    def _safe_upload_path(folder, original: str, forced_suffix: str | None = None):
+        """Return a path under folder that is safe and unique.
+
+        Strips directory components from the original filename (path traversal
+        guard) and appends a counter if the target already exists.
+        """
+        from pathlib import Path
+        safe_name = Path(original).name or "upload"
+        stem = Path(safe_name).stem or "upload"
+        suffix = forced_suffix if forced_suffix is not None else (Path(safe_name).suffix or ".bin")
+        candidate = folder / f"{stem}{suffix}"
+        i = 2
+        while candidate.exists():
+            candidate = folder / f"{stem}-{i}{suffix}"
+            i += 1
+        return candidate
+
     async def _save_upload_artifact(
         self, message: discord.Message, name: str, text: str
     ) -> str:
@@ -641,13 +665,12 @@ class ResearchBot(discord.Client):
             )
             self._ensured_projects.add(project_key)
             folder = self.projects.kind_dir(project["slug"], "uploads")
-            stem = Path(name).stem or "upload"
-            out = folder / f"{stem}.txt"
+            out = self._safe_upload_path(folder, name, ".txt")
             out.write_text(text)
             rel = str(out.resolve().relative_to(Path(settings.output_dir).resolve()))
             if project.get("id"):
                 await self.projects.add_artifact(
-                    project["id"], "upload", stem, rel, {"original": name},
+                    project["id"], "upload", out.stem, rel, {"original": name},
                 )
             return rel
         except Exception:  # noqa: BLE001 — saving must not drop the message
@@ -670,13 +693,12 @@ class ResearchBot(discord.Client):
             )
             self._ensured_projects.add(project_key)
             folder = self.projects.kind_dir(project["slug"], "uploads")
-            out = folder / name
+            out = self._safe_upload_path(folder, name)
             out.write_bytes(data)
             rel = str(out.resolve().relative_to(Path(settings.output_dir).resolve()))
             if project.get("id"):
-                stem = Path(name).stem or "upload"
                 await self.projects.add_artifact(
-                    project["id"], "upload", stem, rel, {"original": name},
+                    project["id"], "upload", out.stem, rel, {"original": name},
                 )
         except Exception:  # noqa: BLE001
             logger.exception("Failed to save binary artifact for %s", name)
