@@ -280,14 +280,14 @@ class Consortium:
     async def _agent_say(self, model: str, system: str, instruction: str,
                          transcript: list[tuple[str, str]] | None = None) -> tuple[str, list]:
         """Run one tool-using agent turn; return (reply_text, message_history)."""
-        from langgraph.prebuilt import create_react_agent
+        from langgraph.prebuilt import ToolNode, create_react_agent
 
         from ..llm import build_openrouter_chat
 
+        # handle_tool_errors moved from create_react_agent to ToolNode in LangGraph 1.x
         agent = create_react_agent(
             build_openrouter_chat(model, self.temperature, max_tokens=6000),
-            self.tools, prompt=system,
-            handle_tool_errors=True,
+            ToolNode(self.tools, handle_tool_errors=True), prompt=system,
         )
         if transcript:
             content = f"Debate so far:\n\n{render_transcript(transcript)}\n\n---\n{instruction}"
