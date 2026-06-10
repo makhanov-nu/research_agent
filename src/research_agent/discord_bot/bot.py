@@ -346,6 +346,16 @@ class ResearchBot(discord.Client):
         )
         thread_id = str(channel_id)
         config = {"configurable": {"thread_id": thread_id}}
+
+        # Failures always get a direct notification so the user isn't left
+        # wondering — don't rely on the orchestrator to volunteer bad news.
+        if status == "failed":
+            error_summary = (row.get("error") or "unknown error") if row else "task not found"
+            await self._notify_channel(
+                channel_id, f"❌ Task #{task_id} ({agent}){proj_tag} failed: {error_summary}"
+            )
+            return
+
         try:
             async with self._channel_locks.get(thread_id):
                 result = await self.graph.ainvoke(
