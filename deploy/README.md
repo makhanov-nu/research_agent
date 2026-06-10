@@ -29,8 +29,17 @@ sudo systemctl daemon-reload && sudo systemctl enable --now research-agent-web
 #    matches your Cloudflare SSL mode, then:
 sudo apt install -y caddy
 sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
-sudo systemctl restart caddy
+# For Full (strict): create a Cloudflare Origin Certificate and save it, then
+# make it readable by the caddy user (Caddy runs as `caddy`, not root):
+sudo tee /etc/caddy/origin.pem >/dev/null   # paste cert, Ctrl-D
+sudo tee /etc/caddy/origin.key >/dev/null   # paste key,  Ctrl-D
+sudo chown caddy:caddy /etc/caddy/origin.pem /etc/caddy/origin.key
+sudo chmod 640 /etc/caddy/origin.pem /etc/caddy/origin.key
+sudo systemctl reload caddy
 ```
+
+Then in Cloudflare set SSL/TLS mode to **Full (strict)**, and open the GCP
+firewall for tcp:80,443 so Cloudflare can reach the origin.
 
 Open the GCP firewall for 80/443 (Cloudflare → origin).
 
@@ -51,5 +60,12 @@ PHOENIX_ENABLED=true
 ## Updating later
 
 ```bash
-rsync the dist/ again (after rebuilding) and: sudo systemctl restart research-agent-web
+# 1) Pull code on VPS and restart bot
+ssh research-vps "cd ~/research_agent && git pull origin main && source .venv/bin/activate && pip install -e '.[memory,web,obs]' && sudo systemctl restart research-agent.service"
+
+# 2) Rebuild SPA on your laptop and rsync
+cd src/research_agent/web/frontend && npm run build
+rsync -az src/research_agent/web/frontend/dist/ \
+  research-vps:~/research_agent/src/research_agent/web/frontend/dist/
+ssh research-vps "sudo systemctl restart research-agent-web.service"
 ```

@@ -138,9 +138,13 @@ def create_app():
             raise HTTPException(400, "invalid path")
         if not target.is_file():
             raise HTTPException(404, "file not found")
-        # Render text inline; offer binary as a download.
+        # Text files: render inline as plain text.
         if target.suffix.lower() in {".tex", ".bib", ".md", ".txt", ".json", ".py", ".log", ".csv"}:
             return PlainTextResponse(target.read_text(errors="replace"))
+        # Image files: serve inline so <img> tags work in the web UI.
+        if target.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".tiff", ".tif"}:
+            return FileResponse(target)
+        # Other binary: offer as a download.
         return FileResponse(target, filename=target.name)
 
     async def _attach_projects(rows: list[dict]) -> list[dict]:

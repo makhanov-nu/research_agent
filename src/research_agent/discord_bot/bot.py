@@ -37,6 +37,9 @@ TEXT_EXTS = {
     "csv", "tsv", "json", "yaml", "yml", "py", "log",
 }
 
+# Image extensions saved as binary to the project uploads folder.
+IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "tiff", "tif"}
+
 HELP_TEXT = (
     "**Commands**\n"
     "`!checkpoint` (or `!summarize`) — summarize this thread to long-term "
@@ -323,9 +326,12 @@ class ResearchBot(discord.Client):
         else:
             payload = row.get("result") or "(the task recorded no result)"
         # Tag the project so concurrent projects' completions are unambiguous.
+        # channel_id may be a thread; resolve to the parent channel for project lookup.
         proj_tag = ""
         if self.projects is not None:
-            proj = await self.projects.get_by_channel(str(channel_id))
+            chan = self.get_channel(int(channel_id)) if channel_id else None
+            project_key = self._project_channel_id(chan) if chan else str(channel_id) if channel_id else None
+            proj = await self.projects.get_by_channel(project_key)
             if proj:
                 proj_tag = f" [project: {proj['name']} #{proj['id']}]"
         event = (
@@ -361,21 +367,31 @@ class ResearchBot(discord.Client):
         replied_to_me = await self._is_reply_to_me(message)
         addressed = is_dm or mentioned or replied_to_me
 
-        thread_id = str(message.channel.id)
         author_id = message.author.id
-        engaged = author_id in self._engaged.get(thread_id, set())
+        check_id = str(message.channel.id)
+        engaged = author_id in self._engaged.get(check_id, set())
 
         # Answer when addressed, or when already engaged in this channel (sticky,
         # scoped to this author). Otherwise stay out of the conversation.
         if not (addressed or engaged):
             return
 
-        # Being addressed (re)engages this author here until they `!mute`.
+        # First @-mention in a plain text channel: open a thread so the bot's
+        # replies don't flood the channel wall. Subsequent messages arrive inside
+        # the thread (message.channel IS the thread), so this branch won't fire again.
+        is_in_thread = isinstance(message.channel, discord.Thread)
+        if addressed and not is_dm and not is_in_thread:
+            dest = await self._to_thread(message)
+            message._dest = dest
+            thread_id = str(dest.id)
+        else:
+            thread_id = check_id
+
+        # Being addressed (re)engages this author in this thread until !mute.
         if addressed and not is_dm:
             self._engaged.setdefault(thread_id, set()).add(author_id)
 
-        # Make sure this conversation (channel OR thread) has a project, so it
-        # shows in the dashboard from the very first message.
+        # Ensure the channel's project exists (threads share the parent channel's project).
         await self._ensure_project(message)
 
         content = message.content
@@ -396,7 +412,7 @@ class ResearchBot(discord.Client):
         attach_text, attach_notes = await self._ingest_attachments(message)
 
         if not content and not attach_text:
-            await message.channel.send(attach_notes or "Hi — what are we researching?")
+            await self._ch(message).send(attach_notes or "Hi — what are we researching?")
             return
 
         # A plain reply of idea numbers picks consortium ideas while a session is
@@ -407,13 +423,13 @@ class ResearchBot(discord.Client):
             if picks:
                 await self._consortium_polish(message, session, picks=picks)
             else:
-                await message.channel.send(
+                await self._ch(message).send(
                     "Reply with the idea numbers to develop (e.g. `2,4`), or `!ideate done`."
                 )
             return
 
         if attach_notes:  # surface unreadable-file warnings alongside the answer
-            await message.channel.send(attach_notes)
+            await self._ch(message).send(attach_notes)
 
         effective = (content + ("\n\n" + attach_text if attach_text else "")).strip()
         await self._handle_chat(message, effective, config, thread_id)
@@ -447,18 +463,69 @@ class ResearchBot(discord.Client):
         author = getattr(message.author, "display_name", None) or "researcher"
         return f"DM · {author}"
 
+    @staticmethod
+    def _project_channel_id(channel) -> str:
+        """Project key: parent channel id for threads, own id otherwise.
+
+        Threads inside a server channel share that channel's project so all
+        conversations in e.g. #sgprotonet appear under one research project.
+        """
+        parent_id = getattr(channel, "parent_id", None)
+        return str(parent_id) if parent_id else str(channel.id)
+
+    @staticmethod
+    def _project_name(channel, author=None) -> str:
+        """Human-readable project name: parent channel for threads, channel name, or DM."""
+        parent = getattr(channel, "parent", None)
+        if parent is not None:
+            return getattr(parent, "name", None) or "project"
+        name = getattr(channel, "name", None)
+        if name:
+            return name
+        display = getattr(author, "display_name", None) or "researcher"
+        return f"DM · {display}"
+
+    @staticmethod
+    def _ch(message: discord.Message) -> discord.abc.Messageable:
+        """Reply target: the thread opened this turn, or the original channel."""
+        return getattr(message, "_dest", None) or message.channel
+
+    async def _to_thread(self, message: discord.Message) -> discord.abc.Messageable:
+        """Create a public thread on a text-channel message and return it.
+
+        Falls back silently to the channel if the bot lacks permission.
+        """
+        content = message.content
+        if self.user:
+            for token in (f"<@{self.user.id}>", f"<@!{self.user.id}>"):
+                content = content.replace(token, "")
+        content = content.strip()
+        name = content[:80] if content else f"Research · {message.author.display_name}"
+        try:
+            return await message.create_thread(name=name or "Research", auto_archive_duration=1440)
+        except (discord.Forbidden, discord.HTTPException):
+            logger.warning("Could not create thread in %s, replying in channel", message.channel)
+            return message.channel
+
     async def _ensure_project(self, message: discord.Message) -> None:
-        """Create this channel/thread's project on first contact (idempotent)."""
+        """Create (or reuse) the project for this channel/thread (idempotent).
+
+        Threads share their parent channel's project so all conversations inside
+        #sgprotonet appear under one research project in the dashboard.
+        """
         if self.projects is None:
             return
-        thread_id = str(message.channel.id)
-        if thread_id in self._ensured_projects:
+        project_key = self._project_channel_id(self._ch(message))
+        if project_key in self._ensured_projects:
             return
         try:
-            await self.projects.ensure(thread_id, name=self._channel_label(message))
-            self._ensured_projects.add(thread_id)
+            await self.projects.ensure(
+                project_key,
+                name=self._project_name(self._ch(message), message.author),
+            )
+            self._ensured_projects.add(project_key)
         except Exception:  # noqa: BLE001 — a project hiccup must not drop the message
-            logger.exception("Failed to ensure project for channel %s", thread_id)
+            logger.exception("Failed to ensure project for channel %s", project_key)
 
     async def _ingest_attachments(self, message: discord.Message) -> tuple[str, str]:
         """Download uploaded files → (inline_text, notes).
@@ -500,10 +567,14 @@ class ResearchBot(discord.Client):
                     continue
             elif ext in TEXT_EXTS or ctype.startswith("text/"):
                 text = data.decode("utf-8", errors="replace")
+            elif ext in IMAGE_EXTS or ctype.startswith("image/"):
+                await self._save_binary_artifact(message, name, data)
+                notes.append(f"📎 `{name}` saved to the project.")
+                continue
             else:
                 notes.append(
                     f"ℹ️ `{name}` ({ctype or ext or 'unknown type'}) isn't a readable "
-                    "doc — I can read PDF, LaTeX, and plain-text files."
+                    "doc — I can read PDF, LaTeX, plain-text, and image files."
                 )
                 continue
 
@@ -561,10 +632,12 @@ class ResearchBot(discord.Client):
         from pathlib import Path
 
         try:
+            project_key = self._project_channel_id(self._ch(message))
             project = await self.projects.ensure(
-                str(message.channel.id), name=self._channel_label(message)
+                project_key,
+                name=self._project_name(self._ch(message), message.author),
             )
-            self._ensured_projects.add(str(message.channel.id))
+            self._ensured_projects.add(project_key)
             folder = self.projects.kind_dir(project["slug"], "uploads")
             stem = Path(name).stem or "upload"
             out = folder / f"{stem}.txt"
@@ -579,12 +652,39 @@ class ResearchBot(discord.Client):
             logger.exception("Failed to save upload artifact for %s", name)
             return ""
 
+    async def _save_binary_artifact(
+        self, message: discord.Message, name: str, data: bytes
+    ) -> None:
+        """Save binary attachment (image, etc.) directly to the project uploads folder."""
+        if self.projects is None:
+            return
+        from pathlib import Path
+
+        try:
+            project_key = self._project_channel_id(self._ch(message))
+            project = await self.projects.ensure(
+                project_key,
+                name=self._project_name(self._ch(message), message.author),
+            )
+            self._ensured_projects.add(project_key)
+            folder = self.projects.kind_dir(project["slug"], "uploads")
+            out = folder / name
+            out.write_bytes(data)
+            rel = str(out.resolve().relative_to(Path(settings.output_dir).resolve()))
+            if project.get("id"):
+                stem = Path(name).stem or "upload"
+                await self.projects.add_artifact(
+                    project["id"], "upload", stem, rel, {"original": name},
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to save binary artifact for %s", name)
+
     async def _handle_chat(self, message, content, config, thread_id) -> None:
         try:
             # Serialize per channel so concurrent messages in the same thread
             # don't race on shared checkpoint/memory state.
             async with self._channel_locks.get(thread_id):
-                async with message.channel.typing():
+                async with self._ch(message).typing():
                     result = await self.graph.ainvoke(
                         {"messages": [("user", content)]}, config=config
                     )
@@ -593,13 +693,13 @@ class ResearchBot(discord.Client):
             summary = result.get("summary") or ""
         except Exception:  # noqa: BLE001
             logger.exception("Error handling message")
-            await message.channel.send(
+            await self._ch(message).send(
                 "Something went wrong while I was thinking. Check the logs."
             )
             return
 
         for chunk in _chunk(reply):
-            await message.channel.send(chunk)
+            await self._ch(message).send(chunk)
 
         # Persist the exchange to memory without blocking the reply. Passing the
         # current summary keeps the durable episodic summary in sync with any
@@ -617,18 +717,18 @@ class ResearchBot(discord.Client):
         cmd = cmd.lower()
 
         if cmd == "help":
-            await message.channel.send(HELP_TEXT)
+            await self._ch(message).send(HELP_TEXT)
         elif cmd in {"checkpoint", "summarize"}:
             await self._checkpoint(message, config)
         elif cmd == "remember":
             arg = arg.strip()
             if not arg:
-                await message.channel.send("Usage: `!remember <text>`")
+                await self._ch(message).send("Usage: `!remember <text>`")
             elif self.memory is not None:
                 await self.memory.procedural.add(arg, kind="preference")
-                await message.channel.send("Noted — I'll remember that.")
+                await self._ch(message).send("Noted — I'll remember that.")
             else:
-                await message.channel.send("Memory isn't configured, so I can't store that.")
+                await self._ch(message).send("Memory isn't configured, so I can't store that.")
         elif cmd in {"runs", "approve", "cancel"}:
             await self._handle_experiment_command(message, cmd, arg.strip())
         elif cmd == "gpu":
@@ -636,7 +736,7 @@ class ResearchBot(discord.Client):
         elif cmd == "getfile":
             await self._send_file(message, arg.strip())
         elif cmd == "ideate":
-            await self._ideate(message, arg.strip())
+            await self._ideate(message, arg.strip(), config)
         elif cmd in {"tasks", "task", "trace"}:
             await self._handle_task_command(message, cmd, arg.strip())
         elif cmd == "feedback":
@@ -644,23 +744,23 @@ class ResearchBot(discord.Client):
         elif cmd == "project":
             await self._handle_project_command(message, arg.strip())
         elif cmd in {"mute", "stop", "quiet"}:
-            self._engaged.get(str(message.channel.id), set()).discard(message.author.id)
-            await message.channel.send(
+            self._engaged.get(config["configurable"]["thread_id"], set()).discard(message.author.id)
+            await self._ch(message).send(
                 "Muted here — I'll stay quiet until you @-mention me or reply to me again."
             )
         else:
-            await message.channel.send(f"Unknown command `!{cmd}`.\n\n{HELP_TEXT}")
+            await self._ch(message).send(f"Unknown command `!{cmd}`.\n\n{HELP_TEXT}")
 
     async def _handle_project_command(self, message, arg) -> None:
         """`!project` shows this chat's project; `!project name <x>` renames it."""
         if self.projects is None:
-            await message.channel.send("Projects aren't configured (needs the DB).")
+            await self._ch(message).send("Projects aren't configured (needs the DB).")
             return
-        channel_id = str(message.channel.id)
+        channel_id = self._project_channel_id(self._ch(message))
         if arg.lower().startswith("name "):
             new_name = arg[5:].strip()
             proj = await self.projects.rename(channel_id, new_name)
-            await message.channel.send(f"Project renamed to **{proj['name']}** (`{proj['slug']}`).")
+            await self._ch(message).send(f"Project renamed to **{proj['name']}** (`{proj['slug']}`).")
             return
         proj = await self.projects.ensure(channel_id)
         arts = await self.projects.list_artifacts(proj["id"]) if proj.get("id") else []
@@ -668,7 +768,7 @@ class ResearchBot(discord.Client):
         for a in arts:
             by_kind[a["kind"]] = by_kind.get(a["kind"], 0) + 1
         summary = ", ".join(f"{k}: {v}" for k, v in by_kind.items()) or "no artifacts yet"
-        await message.channel.send(
+        await self._ch(message).send(
             f"**Project:** {proj['name']} (`{proj['slug']}`)\n"
             f"Artifacts — {summary}\n"
             f"Folder: `outputs/projects/{proj['slug']}/`  ·  rename with `!project name <x>`"
@@ -676,27 +776,27 @@ class ResearchBot(discord.Client):
 
     async def _handle_task_command(self, message, cmd, arg) -> None:
         if self.tasks is None:
-            await message.channel.send("The task dashboard isn't configured (needs the DB).")
+            await self._ch(message).send("The task dashboard isn't configured (needs the DB).")
             return
 
         if cmd == "tasks":
             rows = await self.tasks.list_recent(limit=15)
             if not rows:
-                await message.channel.send("No tasks yet.")
+                await self._ch(message).send("No tasks yet.")
                 return
             lines = [
                 f"#{r['id']} [{r['status']}] {r['agent']} — {r['input'][:60]}"
                 for r in rows
             ]
-            await message.channel.send("**Tasks (recent)**\n" + "\n".join(lines))
+            await self._ch(message).send("**Tasks (recent)**\n" + "\n".join(lines))
             return
 
         if not arg.isdigit():
-            await message.channel.send(f"Usage: `!{cmd} <task_id>`")
+            await self._ch(message).send(f"Usage: `!{cmd} <task_id>`")
             return
         task = await self.tasks.get(int(arg))
         if task is None:
-            await message.channel.send(f"No task #{arg}.")
+            await self._ch(message).send(f"No task #{arg}.")
             return
 
         if cmd == "task":
@@ -706,7 +806,7 @@ class ResearchBot(discord.Client):
                 f"{(task.get('result') or task.get('error') or '(no result yet)')}"
             )
             for chunk in _chunk(body):
-                await message.channel.send(chunk)
+                await self._ch(message).send(chunk)
             return
 
         # cmd == "trace": export the full trace as a JSON file via outputs/
@@ -717,7 +817,7 @@ class ResearchBot(discord.Client):
         traces_dir.mkdir(parents=True, exist_ok=True)
         out = traces_dir / f"task_{task['id']}.json"
         out.write_text(json.dumps(task.get("trace") or [], indent=2, default=str))
-        await message.channel.send(
+        await self._ch(message).send(
             f"Exported trace for task #{task['id']} "
             f"({len(task.get('trace') or [])} steps): `!getfile traces/{out.name}`"
         )
@@ -730,18 +830,18 @@ class ResearchBot(discord.Client):
         future jobs of that kind are primed with your correction.
         """
         if self.tasks is None:
-            await message.channel.send("The task dashboard isn't configured (needs the DB).")
+            await self._ch(message).send("The task dashboard isn't configured (needs the DB).")
             return
         parts = arg.split(maxsplit=2)
         if len(parts) < 2 or not parts[0].isdigit() or parts[1].lower() not in {"good", "bad"}:
-            await message.channel.send("Usage: `!feedback <task_id> <good|bad> [note]`")
+            await self._ch(message).send("Usage: `!feedback <task_id> <good|bad> [note]`")
             return
         task_id, quality = int(parts[0]), parts[1].lower()
         note = parts[2].strip() if len(parts) > 2 else ""
 
         task = await self.tasks.get(task_id)
         if task is None:
-            await message.channel.send(f"No task #{task_id}.")
+            await self._ch(message).send(f"No task #{task_id}.")
             return
 
         ok = await self.tasks.set_feedback(task_id, quality, note or None)
@@ -749,8 +849,9 @@ class ResearchBot(discord.Client):
         banked = False
         if ok and self.memory is not None:
             try:
+                project_key = self._project_channel_id(self._ch(message))
                 project = (
-                    await self.projects.get_by_channel(str(message.channel.id))
+                    await self.projects.get_by_channel(project_key)
                     if self.projects is not None else None
                 )
                 verdict = "was good — reuse this approach" if quality == "good" else "needs correction"
@@ -760,7 +861,7 @@ class ResearchBot(discord.Client):
                     + (f" Specifically: {note}" if note else "")
                 )
                 await self.memory.record_lesson(
-                    lesson, kind=agent, channel_id=str(message.channel.id),
+                    lesson, kind=agent, channel_id=project_key,
                     status=quality, project=(project["slug"] if project else None),
                 )
                 banked = True
@@ -769,11 +870,11 @@ class ResearchBot(discord.Client):
 
         if ok:
             tail = " and banked a lesson for next time." if banked else "."
-            await message.channel.send(f"Logged **{quality}** feedback on task #{task_id}{tail}")
+            await self._ch(message).send(f"Logged **{quality}** feedback on task #{task_id}{tail}")
         else:
-            await message.channel.send(f"Couldn't update task #{task_id}.")
+            await self._ch(message).send(f"Couldn't update task #{task_id}.")
 
-    async def _ideate(self, message, arg) -> None:
+    async def _ideate(self, message, arg, config) -> None:
         """Drive the consortium.
 
         `!ideate <topic>` runs round 1 (independent + debated proposals, then
@@ -782,41 +883,41 @@ class ResearchBot(discord.Client):
         `!ideate done` finalizes; `!ideate cancel` drops the session.
         """
         if self.consortium is None:
-            await message.channel.send(
+            await self._ch(message).send(
                 "The consortium isn't configured (needs OPENROUTER_API_KEY)."
             )
             return
 
-        thread_id = str(message.channel.id)
+        thread_id = config["configurable"]["thread_id"]
         session = self.consortium_sessions.get(thread_id)
         sub, _, rest = arg.strip().partition(" ")
         sub, rest = sub.lower(), rest.strip()
 
         if sub in {"done", "finish", "finalize"}:
             if session is not None:
-                await self._finalize_consortium(message, session)
+                await self._finalize_consortium(message, session, config)
             else:
-                await message.channel.send("No active session. Start one with `!ideate <topic>`.")
+                await self._ch(message).send("No active session. Start one with `!ideate <topic>`.")
             return
         if sub in {"cancel", "stop", "abort"}:
             if session is not None:
                 self.consortium_sessions.pop(thread_id, None)
-                await message.channel.send("Consortium session cancelled.")
+                await self._ch(message).send("Consortium session cancelled.")
             else:
-                await message.channel.send("No active consortium session to cancel.")
+                await self._ch(message).send("No active consortium session to cancel.")
             return
         if sub in {"again", "refine", "another"}:
             if session is not None and session.phase == "polished":
                 await self._consortium_polish(message, session, picks=None, comments=rest)
             else:
-                await message.channel.send("Nothing to refine yet — pick ideas from a round-1 top-5 first.")
+                await self._ch(message).send("Nothing to refine yet — pick ideas from a round-1 top-5 first.")
             return
         if sub == "pick":
             picks = _parse_picks(rest)
             if session is not None and session.phase == "scored" and picks:
                 await self._consortium_polish(message, session, picks=picks)
             else:
-                await message.channel.send("`!ideate pick <numbers>` works on a round-1 top-5.")
+                await self._ch(message).send("`!ideate pick <numbers>` works on a round-1 top-5.")
             return
 
         # An active session: route by phase.
@@ -825,16 +926,16 @@ class ResearchBot(discord.Client):
             if session.phase == "scored" and picks:
                 await self._consortium_polish(message, session, picks=picks)
             else:
-                await message.channel.send(self._ideate_hint(session))
+                await self._ch(message).send(self._ideate_hint(session))
             return
 
         # No active session: start a fresh one on the given topic.
         if not arg.strip():
-            await message.channel.send("Usage: `!ideate <topic>`")
+            await self._ch(message).send("Usage: `!ideate <topic>`")
             return
         session = self.consortium.new_session(arg.strip())
         self.consortium_sessions[thread_id] = session
-        await message.channel.send(
+        await self._ch(message).send(
             f"Convening the consortium on **{arg.strip()}**.\n"
             f"Panel: {', '.join(self.consortium.panel)} · chair: {self.consortium.chair_model}.\n"
             "Round 1: each model proposes 3 ideas **independently**, a separate "
@@ -853,83 +954,85 @@ class ResearchBot(discord.Client):
 
     async def _consortium_round1(self, message, session) -> None:
         if session.busy:
-            await message.channel.send("The panel is still deliberating — one moment…")
+            await self._ch(message).send("The panel is still deliberating — one moment…")
             return
         session.busy = True
         try:
-            async with message.channel.typing():
+            async with self._ch(message).typing():
                 await session.run_round1()
         except Exception:  # noqa: BLE001
             logger.exception("Consortium round 1 failed")
-            await message.channel.send("The consortium hit an error this round. Check the logs.")
+            await self._ch(message).send("The consortium hit an error this round. Check the logs.")
             return
         finally:
             session.busy = False
 
         for chunk in _chunk("**Round 1 — top 5 (scored 0–10)**\n\n" + session.render_top()):
-            await message.channel.send(chunk)
-        await message.channel.send(
+            await self._ch(message).send(chunk)
+        await self._ch(message).send(
             "Reply with the numbers to develop (e.g. `2,4`), or `!ideate done` to finalize."
         )
 
     async def _consortium_polish(self, message, session, picks: list[int] | None, comments: str = "") -> None:
         if session.busy:
-            await message.channel.send("The panel is still deliberating — one moment…")
+            await self._ch(message).send("The panel is still deliberating — one moment…")
             return
         session.busy = True
         try:
-            async with message.channel.typing():
+            async with self._ch(message).typing():
                 await session.select_and_polish(picks=picks, comments=comments)
         except Exception:  # noqa: BLE001
             logger.exception("Consortium polish round failed")
-            await message.channel.send("The panel hit an error polishing. Check the logs.")
+            await self._ch(message).send("The panel hit an error polishing. Check the logs.")
             return
         finally:
             session.busy = False
 
         for chunk in _chunk(f"**Round {session.round_no} — polished & voted**\n\n" + session.render_top()):
-            await message.channel.send(chunk)
-        await message.channel.send(
+            await self._ch(message).send(chunk)
+        await self._ch(message).send(
             "Reply `!ideate again <notes>` for another round, or `!ideate done` to finalize."
         )
 
-    async def _finalize_consortium(self, message, session) -> None:
+    async def _finalize_consortium(self, message, session, config) -> None:
         if session.busy:
-            await message.channel.send("The panel is still deliberating — one moment…")
+            await self._ch(message).send("The panel is still deliberating — one moment…")
             return
         session.busy = True
         try:
-            async with message.channel.typing():
+            async with self._ch(message).typing():
                 result = await session.finalize()
         except Exception:  # noqa: BLE001
             logger.exception("Consortium finalize failed")
-            await message.channel.send("The chair hit an error finalizing. Check the logs.")
+            await self._ch(message).send("The chair hit an error finalizing. Check the logs.")
             session.busy = False
             return
         session.busy = False
-        self.consortium_sessions.pop(str(message.channel.id), None)
+        thread_id = config["configurable"]["thread_id"]
+        self.consortium_sessions.pop(thread_id, None)
 
         # Save the chosen proposal(s) into the project's council folder.
         council_rel = ""
+        project_key = self._project_channel_id(self._ch(message))
         if self.projects is not None:
             from ..projects import save_council_proposal
 
-            project = await self.projects.ensure(str(message.channel.id))
+            project = await self.projects.ensure(project_key)
             council_rel = await save_council_proposal(
                 self.projects, project, session.topic, result["ideas"]
             )
 
         # Capture the session (incl. the debate) to memory so future ideation's
-        # debate track recalls it.
+        # debate track recalls it (scoped to the project, not the individual thread).
         from ..consortium import capture_council
 
         await capture_council(
-            self.memory, str(message.channel.id), session.topic,
+            self.memory, project_key, session.topic,
             result["ideas"], result["rel_path"], rounds=result["rounds"],
         )
 
         for chunk in _chunk(result["ideas"]):
-            await message.channel.send(chunk)
+            await self._ch(message).send(chunk)
         tail = (
             f"Done after {result['rounds']} round(s). "
             f"Full transcript (ideas + debates): `!getfile {result['rel_path']}`\n"
@@ -937,11 +1040,11 @@ class ResearchBot(discord.Client):
         if council_rel:
             tail += f"Saved for methodology: `!getfile {council_rel}`\n"
         tail += "Want me to hand a chosen idea to the methodology writer? Just say the word."
-        await message.channel.send(tail)
+        await self._ch(message).send(tail)
 
     async def _send_file(self, message, relpath: str) -> None:
         if not relpath:
-            await message.channel.send("Usage: `!getfile <path>` (relative to outputs/)")
+            await self._ch(message).send("Usage: `!getfile <path>` (relative to outputs/)")
             return
         from pathlib import Path
 
@@ -949,46 +1052,44 @@ class ResearchBot(discord.Client):
         target = (base / relpath).resolve()
         # Confine to the outputs directory; reject traversal / absolute escapes.
         if target != base and base not in target.parents:
-            await message.channel.send("Path is outside the outputs directory.")
+            await self._ch(message).send("Path is outside the outputs directory.")
             return
         if not target.is_file():
-            await message.channel.send(f"No such file: `{relpath}`")
+            await self._ch(message).send(f"No such file: `{relpath}`")
             return
         # Discord's default non-boosted upload limit is 25 MB; stay well under.
         if target.stat().st_size > 8 * 1024 * 1024:
-            await message.channel.send("File is too large to upload (>8 MB).")
+            await self._ch(message).send("File is too large to upload (>8 MB).")
             return
-        await message.channel.send(file=discord.File(str(target)))
+        await self._ch(message).send(file=discord.File(str(target)))
 
     async def _attach_gpu(self, message, arg) -> None:
         """Attach a fresh GPU box (`!gpu user@ip`) and provision it in the background."""
         if self.experiments is None:
-            await message.channel.send(
+            await self._ch(message).send(
                 "Experiment runner isn't configured (needs a database)."
             )
             return
         if not arg:
-            await message.channel.send("Usage: `!gpu <user@ip>` (bare Ubuntu, your SSH key).")
+            await self._ch(message).send("Usage: `!gpu <user@ip>` (bare Ubuntu, your SSH key).")
             return
 
         msg = await self.experiments.set_compute(arg)
-        await message.channel.send(
+        await self._ch(message).send(
             f"{msg}\nProvisioning (Docker + NVIDIA toolkit + MLflow) — I'll report back."
         )
+        notify_id = str(self._ch(message).id)
 
         async def _provision_and_report() -> None:
             try:
                 report = await self.experiments.provision()
                 survey = await self.experiments.survey()
             except Exception as exc:  # noqa: BLE001
-                await self._notify_channel(
-                    str(message.channel.id),
-                    f"GPU provisioning failed: {exc}",
-                )
+                await self._notify_channel(notify_id, f"GPU provisioning failed: {exc}")
                 return
             tail = "\n".join(report.splitlines()[-15:])
             await self._notify_channel(
-                str(message.channel.id),
+                notify_id,
                 f"✅ GPU box ready.\n```\n{survey}\n```\n_provision log (tail):_\n```\n{tail}\n```",
             )
 
@@ -996,28 +1097,28 @@ class ResearchBot(discord.Client):
 
     async def _handle_experiment_command(self, message, cmd, arg) -> None:
         if self.experiments is None:
-            await message.channel.send("Experiment runner isn't configured.")
+            await self._ch(message).send("Experiment runner isn't configured.")
             return
 
         if cmd == "runs":
             rows = await self.memory.episodic.list_experiments(limit=15)
             if not rows:
-                await message.channel.send("No experiments yet.")
+                await self._ch(message).send("No experiments yet.")
                 return
             lines = [f"#{r['id']} [{r['status']}] {r['title']}" for r in rows]
-            await message.channel.send("**Experiments**\n" + "\n".join(lines))
+            await self._ch(message).send("**Experiments**\n" + "\n".join(lines))
             return
 
         if not arg.isdigit():
-            await message.channel.send(f"Usage: `!{cmd} <experiment_id>`")
+            await self._ch(message).send(f"Usage: `!{cmd} <experiment_id>`")
             return
         exp_id = int(arg)
-        async with message.channel.typing():
+        async with self._ch(message).typing():
             if cmd == "approve":
                 result = await self.experiments.approve_and_launch(exp_id)
             else:  # cancel
                 result = await self.experiments.cancel(exp_id)
-        await message.channel.send(result)
+        await self._ch(message).send(result)
 
     async def _checkpoint(self, message, config) -> None:
         from langchain_core.messages import RemoveMessage
@@ -1030,11 +1131,11 @@ class ResearchBot(discord.Client):
             snapshot = await self.graph.aget_state(config)
             messages = snapshot.values.get("messages", []) if snapshot else []
             if not messages:
-                await message.channel.send("Nothing to checkpoint yet.")
+                await self._ch(message).send("Nothing to checkpoint yet.")
                 return
 
             semantic_saved = False
-            async with message.channel.typing():
+            async with self._ch(message).typing():
                 summary = await summarize_messages(
                     self.llm, messages, snapshot.values.get("summary", "")
                 )
@@ -1056,6 +1157,6 @@ class ResearchBot(discord.Client):
                         )
                         semantic_saved = True
 
-        await message.channel.send(
+        await self._ch(message).send(
             checkpoint_result_message(self.memory is not None, semantic_saved)
         )

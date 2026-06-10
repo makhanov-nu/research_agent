@@ -3,6 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { api } from "../api.js";
 
 const KIND_LABELS = {
+  uploads: "Uploads",
   lit_review: "Literature review",
   council: "Council proposal",
   methodology: "Methodology",
@@ -10,23 +11,36 @@ const KIND_LABELS = {
   paper: "Paper",
 };
 
+const TEXT_EXTS = new Set(["txt", "md", "tex", "bib", "json", "py", "log", "csv", "rst", "yaml", "yml"]);
+const IMG_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "tiff", "tif"]);
+
+function fileExt(name) {
+  const parts = name.split(".");
+  return parts.length > 1 ? parts.pop().toLowerCase() : "";
+}
+
 export default function ProjectDetail() {
   const { id } = useParams();
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
-  const [openFile, setOpenFile] = useState(null); // { rel, content }
+  const [openFile, setOpenFile] = useState(null); // { rel, name, content, isImage }
 
   useEffect(() => {
     api.project(id).then(setData).catch((e) => setError(String(e)));
   }, [id]);
 
-  async function view(rel) {
-    setOpenFile({ rel, content: "Loading…" });
-    try {
-      const content = await api.file(rel);
-      setOpenFile({ rel, content: typeof content === "string" ? content : JSON.stringify(content, null, 2) });
-    } catch (e) {
-      setOpenFile({ rel, content: `Error: ${e}` });
+  async function view(f) {
+    const ext = fileExt(f.name);
+    if (IMG_EXTS.has(ext)) {
+      setOpenFile({ rel: f.rel, name: f.name, content: null, isImage: true });
+    } else {
+      setOpenFile({ rel: f.rel, name: f.name, content: "Loading…", isImage: false });
+      try {
+        const content = await api.file(f.rel);
+        setOpenFile({ rel: f.rel, name: f.name, content: typeof content === "string" ? content : JSON.stringify(content, null, 2), isImage: false });
+      } catch (e) {
+        setOpenFile({ rel: f.rel, name: f.name, content: `Error: ${e}`, isImage: false });
+      }
     }
   }
 
@@ -40,6 +54,11 @@ export default function ProjectDetail() {
     (filesByKind[kind] ||= []).push(f);
   }
 
+  // Ordered sections: known kinds first, then any unknown ones
+  const knownKinds = Object.keys(KIND_LABELS);
+  const unknownKinds = Object.keys(filesByKind).filter((k) => !KIND_LABELS[k]);
+  const allKinds = [...knownKinds, ...unknownKinds];
+
   return (
     <div>
       <Link to="/" className="back">← Projects</Link>
@@ -48,19 +67,31 @@ export default function ProjectDetail() {
 
       <div className="split">
         <div className="files">
-          {Object.keys(KIND_LABELS).map((kind) =>
+          {allKinds.map((kind) =>
             filesByKind[kind] ? (
               <div key={kind} className="kind">
-                <h3>{KIND_LABELS[kind]}</h3>
+                <h3>{KIND_LABELS[kind] || kind}</h3>
                 <ul>
-                  {filesByKind[kind].map((f) => (
-                    <li key={f.rel}>
-                      <button className="linkbtn" onClick={() => view(f.rel)}>
-                        {f.rel.split("/").slice(3).join("/")}
-                      </button>
-                      <span className="muted small"> · {fmtSize(f.size)}</span>
-                    </li>
-                  ))}
+                  {filesByKind[kind].map((f) => {
+                    const ext = fileExt(f.name);
+                    const isImg = IMG_EXTS.has(ext);
+                    const isText = TEXT_EXTS.has(ext);
+                    const label = f.rel.split("/").slice(3).join("/");
+                    return (
+                      <li key={f.rel}>
+                        {isImg || isText ? (
+                          <button className="linkbtn" onClick={() => view(f)}>
+                            {label}
+                          </button>
+                        ) : (
+                          <a href={`/api/file?path=${encodeURIComponent(f.rel)}`} download={f.name}>
+                            {label}
+                          </a>
+                        )}
+                        <span className="muted small"> · {fmtSize(f.size)}</span>
+                      </li>
+                    );
+                  })}
                 </ul>
               </div>
             ) : null
@@ -75,7 +106,15 @@ export default function ProjectDetail() {
                 <span className="mono small">{openFile.rel}</span>
                 <a href={`/api/file?path=${encodeURIComponent(openFile.rel)}`} target="_blank" rel="noreferrer">open raw</a>
               </div>
-              <pre className="filebody">{openFile.content}</pre>
+              {openFile.isImage ? (
+                <img
+                  src={`/api/file?path=${encodeURIComponent(openFile.rel)}`}
+                  alt={openFile.name}
+                  style={{ maxWidth: "100%", maxHeight: "70vh", objectFit: "contain" }}
+                />
+              ) : (
+                <pre className="filebody">{openFile.content}</pre>
+              )}
             </>
           ) : (
             <p className="muted">Select a file to read it here.</p>
