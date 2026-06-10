@@ -8,6 +8,14 @@
 airesearchagent.uk {
 	tls /etc/caddy/origin.pem /etc/caddy/origin.key
 	encode zstd gzip
+
+	# Phoenix trace UI — proxied directly to avoid any intermediate layer.
+	# Strip the /phoenix prefix before forwarding (Phoenix sees / internally).
+	handle_path /phoenix/* {
+		reverse_proxy 127.0.0.1:6006
+	}
+
+	# Everything else → the FastAPI web app
 	reverse_proxy 127.0.0.1:8800
 }
 
