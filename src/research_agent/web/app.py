@@ -138,9 +138,15 @@ def create_app():
             raise HTTPException(400, "invalid path")
         if not target.is_file():
             raise HTTPException(404, "file not found")
-        # Render text inline; offer binary as a download.
+        # Text files: render inline as plain text.
         if target.suffix.lower() in {".tex", ".bib", ".md", ".txt", ".json", ".py", ".log", ".csv"}:
             return PlainTextResponse(target.read_text(errors="replace"))
+        # Raster images: serve inline so <img> tags render in the web UI.
+        # SVG is intentionally excluded — it can contain scripts and would be an
+        # XSS sink if served inline from the app origin with user-supplied content.
+        if target.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"}:
+            return FileResponse(target)
+        # Other binary: offer as a download.
         return FileResponse(target, filename=target.name)
 
     async def _attach_projects(rows: list[dict]) -> list[dict]:
