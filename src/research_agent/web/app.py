@@ -203,8 +203,11 @@ def create_app():
         import httpx
         from fastapi.responses import Response
 
-        root = settings.phoenix_root_path.strip("/")
-        target = f"{settings.phoenix_internal_url.rstrip('/')}/{root}/{path}"
+        # Phoenix's PHOENIX_HOST_ROOT_PATH embeds the prefix (/phoenix) into the
+        # SPA HTML's asset URLs so the browser requests /phoenix/assets/foo.js.
+        # The static file server inside Phoenix mounts at /assets/ (no prefix),
+        # so the proxy must strip the prefix and forward just `path`.
+        target = f"{settings.phoenix_internal_url.rstrip('/')}/{path}"
         url = httpx.URL(target, query=request.url.query.encode("utf-8"))
         fwd = {
             k: v for k, v in request.headers.items()
