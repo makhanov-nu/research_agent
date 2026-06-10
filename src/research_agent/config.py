@@ -138,6 +138,14 @@ class Settings(BaseSettings):
     # Directory for written outputs (LaTeX literature reviews, drafts, etc.).
     output_dir: str = "outputs"
 
+    # --- Discord message ingestion ---
+    # Max size of an uploaded attachment we'll download + parse (bytes).
+    attachment_max_bytes: int = 20 * 1024 * 1024
+    # Max characters of extracted attachment text injected inline into a turn.
+    # The FULL text is always saved as a project artifact; this only bounds what
+    # we thread into the orchestrator's context so a large PDF can't blow it up.
+    attachment_max_chars: int = 24_000
+
     # --- Web frontend (FastAPI + React SPA; auth via WorkOS AuthKit) ---
     web_host: str = "0.0.0.0"
     web_port: int = 8800
