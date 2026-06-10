@@ -12,7 +12,14 @@ relevant papers, then return a concise, well-organized synthesis that directly \
 answers the task: compare approaches, note what is well-established vs. contested, \
 and flag open gaps. Always cite sources with identifiers/links (arXiv id, DOI, \
 PMID, URL). Do not invent papers. Return ONLY the synthesis — the caller does not \
-see your intermediate searches, so make the answer stand on its own."""
+see your intermediate searches, so make the answer stand on its own.
+
+paperclip usage — the -s source flag is REQUIRED:
+  search -s arxiv "query"       arXiv preprints
+  search -s pmc "query"         PubMed Central full-text papers
+  search -s biorxiv "query"     bioRxiv preprints
+  search -s medrxiv "query"     medRxiv preprints
+For biomedical topics search both arxiv and pmc."""
 
 _DESCRIPTION = (
     "Delegate a literature-research task to the literature subagent. Pass a "

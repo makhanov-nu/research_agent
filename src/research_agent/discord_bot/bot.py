@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 
 DISCORD_MAX_CHARS = 2000
 
+# Attachment extensions we read as UTF-8 text (PDFs go through pypdf separately).
+TEXT_EXTS = {
+    "txt", "text", "md", "markdown", "tex", "latex", "bib", "rst",
+    "csv", "tsv", "json", "yaml", "yml", "py", "log",
+}
+
 HELP_TEXT = (
     "**Commands**\n"
     "`!checkpoint` (or `!summarize`) — summarize this thread to long-term "
@@ -51,8 +57,11 @@ HELP_TEXT = (
     "`!trace <id>` — export a task's full trace (reasoning + tool calls) as a file\n"
     "`!feedback <id> <good|bad> [note]` — rate a task; I bank it as a lesson and "
     "a training label\n"
+    "`!mute` — stop following this channel until you @-mention (or reply to) me again\n"
     "`!help` — this message\n\n"
-    "Otherwise, just talk to me — DM or @-mention."
+    "Otherwise, just talk to me — DM, @-mention, or reply. Once you tag me in a "
+    "channel or thread I'll keep following your messages there (and read any PDF / "
+    "LaTeX / text files you attach) until you `!mute`."
 )
 
 
@@ -149,6 +158,13 @@ class ResearchBot(discord.Client):
         self._poller_task: asyncio.Task | None = None
         # Serialize graph/state operations per channel (see issue: ordering).
         self._channel_locks = PerKeyLocks()
+        # Sticky engagement: channel_id -> set of author ids the bot is following
+        # there (so it answers without a fresh @-mention each turn). In-process,
+        # so a restart resets it; the user re-engages with one mention/reply.
+        self._engaged: dict[str, set[int]] = {}
+        # Channels we've already created a project for this process (cache so we
+        # don't re-hit the DB on every message).
+        self._ensured_projects: set[str] = set()
 
     async def setup_hook(self) -> None:
         self.llm = get_llm()
@@ -341,9 +357,26 @@ class ResearchBot(discord.Client):
             return
 
         is_dm = message.guild is None
-        mentioned = self.user in message.mentions
-        if not (is_dm or mentioned):
+        mentioned = bool(self.user) and self.user in message.mentions
+        replied_to_me = await self._is_reply_to_me(message)
+        addressed = is_dm or mentioned or replied_to_me
+
+        thread_id = str(message.channel.id)
+        author_id = message.author.id
+        engaged = author_id in self._engaged.get(thread_id, set())
+
+        # Answer when addressed, or when already engaged in this channel (sticky,
+        # scoped to this author). Otherwise stay out of the conversation.
+        if not (addressed or engaged):
             return
+
+        # Being addressed (re)engages this author here until they `!mute`.
+        if addressed and not is_dm:
+            self._engaged.setdefault(thread_id, set()).add(author_id)
+
+        # Make sure this conversation (channel OR thread) has a project, so it
+        # shows in the dashboard from the very first message.
+        await self._ensure_project(message)
 
         content = message.content
         if self.user:
@@ -351,20 +384,23 @@ class ResearchBot(discord.Client):
                 content = content.replace(token, "")
         content = content.strip()
 
-        thread_id = str(message.channel.id)
         config = {"configurable": {"thread_id": thread_id}}
 
+        # Commands are explicit and always work (even with no other text).
         if content.startswith("!"):
             await self._handle_command(message, content, config)
             return
-        if not content:
-            await message.channel.send("Hi — what are we researching?")
+
+        # Read any uploaded files (PDF via pypdf; .tex/.md/.txt as text). The full
+        # text is saved as a project artifact; a capped copy is threaded inline.
+        attach_text, attach_notes = await self._ingest_attachments(message)
+
+        if not content and not attach_text:
+            await message.channel.send(attach_notes or "Hi — what are we researching?")
             return
 
-        # When a consortium session is awaiting the researcher's pick (right after
-        # the round-1 top-5), a plain reply with idea numbers selects them. In other
-        # phases the researcher steers with `!ideate again/done`, so plain replies
-        # fall through to normal chat.
+        # A plain reply of idea numbers picks consortium ideas while a session is
+        # awaiting the choice (now works mention-free because we're engaged).
         session = self.consortium_sessions.get(thread_id)
         if session is not None and not session.finalized and session.phase == "scored":
             picks = _parse_picks(content)
@@ -376,7 +412,172 @@ class ResearchBot(discord.Client):
                 )
             return
 
-        await self._handle_chat(message, content, config, thread_id)
+        if attach_notes:  # surface unreadable-file warnings alongside the answer
+            await message.channel.send(attach_notes)
+
+        effective = (content + ("\n\n" + attach_text if attach_text else "")).strip()
+        await self._handle_chat(message, effective, config, thread_id)
+
+    async def _is_reply_to_me(self, message: discord.Message) -> bool:
+        """True if the message is a Discord 'reply' to one of the bot's messages."""
+        ref = getattr(message, "reference", None)
+        if ref is None:
+            return False
+        resolved = getattr(ref, "resolved", None)
+        if isinstance(resolved, discord.Message):
+            return resolved.author == self.user
+        ref_id = getattr(ref, "message_id", None)
+        if ref_id:
+            try:
+                ref_msg = await message.channel.fetch_message(ref_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return False
+            return ref_msg.author == self.user
+        return False
+
+    @staticmethod
+    def _channel_label(message: discord.Message) -> str | None:
+        """A friendly project name from the Discord surface (thread/channel/DM)."""
+        ch = message.channel
+        name = getattr(ch, "name", None)  # TextChannel/Thread have .name; DMs don't
+        if name:
+            parent = getattr(ch, "parent", None)
+            pname = getattr(parent, "name", None)
+            return f"{pname}/{name}" if pname else name
+        author = getattr(message.author, "display_name", None) or "researcher"
+        return f"DM · {author}"
+
+    async def _ensure_project(self, message: discord.Message) -> None:
+        """Create this channel/thread's project on first contact (idempotent)."""
+        if self.projects is None:
+            return
+        thread_id = str(message.channel.id)
+        if thread_id in self._ensured_projects:
+            return
+        try:
+            await self.projects.ensure(thread_id, name=self._channel_label(message))
+            self._ensured_projects.add(thread_id)
+        except Exception:  # noqa: BLE001 — a project hiccup must not drop the message
+            logger.exception("Failed to ensure project for channel %s", thread_id)
+
+    async def _ingest_attachments(self, message: discord.Message) -> tuple[str, str]:
+        """Download uploaded files → (inline_text, notes).
+
+        PDFs are text-extracted via pypdf; recognized text files are decoded as
+        UTF-8. Each file's full text is saved as a project 'upload' artifact, and
+        a length-capped copy is returned for inline context. `notes` collects
+        user-facing warnings about files we couldn't read.
+        """
+        atts = getattr(message, "attachments", None) or []
+        if not atts:
+            return "", ""
+        blocks: list[str] = []
+        notes: list[str] = []
+        for att in atts:
+            name = att.filename or "attachment"
+            ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+            ctype = (att.content_type or "").lower()
+            if (att.size or 0) > settings.attachment_max_bytes:
+                notes.append(
+                    f"⚠️ `{name}` is too large to read "
+                    f"({(att.size or 0) // (1024 * 1024)} MB)."
+                )
+                continue
+            try:
+                data = await att.read()
+            except Exception:  # noqa: BLE001
+                logger.exception("Attachment download failed: %s", name)
+                notes.append(f"⚠️ Couldn't download `{name}`.")
+                continue
+
+            if ext == "pdf" or "pdf" in ctype:
+                text = self._extract_pdf_text(data)
+                if len(text.strip()) < 40:
+                    notes.append(
+                        f"⚠️ Couldn't extract text from `{name}` — is it a scanned/image "
+                        "PDF? Paste the `.tex` or text directly and I'll use it."
+                    )
+                    continue
+            elif ext in TEXT_EXTS or ctype.startswith("text/"):
+                text = data.decode("utf-8", errors="replace")
+            else:
+                notes.append(
+                    f"ℹ️ `{name}` ({ctype or ext or 'unknown type'}) isn't a readable "
+                    "doc — I can read PDF, LaTeX, and plain-text files."
+                )
+                continue
+
+            saved_ref = await self._save_upload_artifact(message, name, text)
+            cap = settings.attachment_max_chars
+            if len(text) > cap:
+                more = len(text) - cap
+                tail = (
+                    f"\n…[truncated {more} chars; full text saved to `{saved_ref}`]"
+                    if saved_ref else f"\n…[truncated {more} chars]"
+                )
+                inline = text[:cap] + tail
+            else:
+                inline = text
+            head = (
+                f"[Attached file: {name} — full text saved to `{saved_ref}`]"
+                if saved_ref else f"[Attached file: {name}]"
+            )
+            blocks.append(f"{head}\n{inline}\n[end of {name}]")
+        return "\n\n".join(blocks), "\n".join(notes)
+
+    @staticmethod
+    def _extract_pdf_text(data: bytes) -> str:
+        """Best-effort text from a PDF's bytes. Returns '' on failure/scanned PDF."""
+        import io
+
+        try:
+            from pypdf import PdfReader
+        except Exception:  # noqa: BLE001 — dependency missing
+            logger.error("pypdf is not installed; cannot read PDF attachments.")
+            return ""
+        try:
+            reader = PdfReader(io.BytesIO(data))
+            parts: list[str] = []
+            for page in reader.pages:
+                try:
+                    parts.append(page.extract_text() or "")
+                except Exception:  # noqa: BLE001 — skip an unreadable page
+                    continue
+            return "\n".join(parts).strip()
+        except Exception:  # noqa: BLE001 — corrupt/encrypted PDF
+            logger.exception("PDF extraction failed")
+            return ""
+
+    async def _save_upload_artifact(
+        self, message: discord.Message, name: str, text: str
+    ) -> str:
+        """Save full attachment text as a project 'upload' artifact.
+
+        Returns the outputs-relative path (usable with `!getfile`) or '' if it
+        couldn't be saved.
+        """
+        if self.projects is None:
+            return ""
+        from pathlib import Path
+
+        try:
+            project = await self.projects.ensure(
+                str(message.channel.id), name=self._channel_label(message)
+            )
+            self._ensured_projects.add(str(message.channel.id))
+            folder = self.projects.kind_dir(project["slug"], "uploads")
+            stem = Path(name).stem or "upload"
+            out = folder / f"{stem}.txt"
+            out.write_text(text)
+            rel = str(out.resolve().relative_to(Path(settings.output_dir).resolve()))
+            if project.get("id"):
+                await self.projects.add_artifact(
+                    project["id"], "upload", stem, rel, {"original": name},
+                )
+            return rel
+        except Exception:  # noqa: BLE001 — saving must not drop the message
+            logger.exception("Failed to save upload artifact for %s", name)
+            return ""
 
     async def _handle_chat(self, message, content, config, thread_id) -> None:
         try:
@@ -442,6 +643,11 @@ class ResearchBot(discord.Client):
             await self._handle_feedback(message, arg.strip())
         elif cmd == "project":
             await self._handle_project_command(message, arg.strip())
+        elif cmd in {"mute", "stop", "quiet"}:
+            self._engaged.get(str(message.channel.id), set()).discard(message.author.id)
+            await message.channel.send(
+                "Muted here — I'll stay quiet until you @-mention me or reply to me again."
+            )
         else:
             await message.channel.send(f"Unknown command `!{cmd}`.\n\n{HELP_TEXT}")
 
