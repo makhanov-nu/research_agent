@@ -12,7 +12,8 @@ const KIND_LABELS = {
 };
 
 const TEXT_EXTS = new Set(["txt", "md", "tex", "bib", "json", "py", "log", "csv", "rst", "yaml", "yml"]);
-const IMG_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "tiff", "tif"]);
+// SVG excluded: untrusted upload content served inline under the app origin is an XSS risk.
+const IMG_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif"]);
 
 function fileExt(name) {
   const parts = name.split(".");

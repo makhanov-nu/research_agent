@@ -168,6 +168,9 @@ class ResearchBot(discord.Client):
         # Channels we've already created a project for this process (cache so we
         # don't re-hit the DB on every message).
         self._ensured_projects: set[str] = set()
+        # Per-message reply destinations: message_id -> thread (or channel).
+        # discord.Message uses __slots__ so we can't set attributes on it directly.
+        self._msg_dest: dict[int, discord.abc.Messageable] = {}
 
     async def setup_hook(self) -> None:
         self.llm = get_llm()
@@ -382,7 +385,7 @@ class ResearchBot(discord.Client):
         is_in_thread = isinstance(message.channel, discord.Thread)
         if addressed and not is_dm and not is_in_thread:
             dest = await self._to_thread(message)
-            message._dest = dest
+            self._msg_dest[message.id] = dest
             thread_id = str(dest.id)
         else:
             thread_id = check_id
@@ -485,10 +488,9 @@ class ResearchBot(discord.Client):
         display = getattr(author, "display_name", None) or "researcher"
         return f"DM · {display}"
 
-    @staticmethod
-    def _ch(message: discord.Message) -> discord.abc.Messageable:
+    def _ch(self, message: discord.Message) -> discord.abc.Messageable:
         """Reply target: the thread opened this turn, or the original channel."""
-        return getattr(message, "_dest", None) or message.channel
+        return self._msg_dest.get(message.id) or message.channel
 
     async def _to_thread(self, message: discord.Message) -> discord.abc.Messageable:
         """Create a public thread on a text-channel message and return it.

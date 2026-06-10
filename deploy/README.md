@@ -41,8 +41,6 @@ sudo systemctl reload caddy
 Then in Cloudflare set SSL/TLS mode to **Full (strict)**, and open the GCP
 firewall for tcp:80,443 so Cloudflare can reach the origin.
 
-Open the GCP firewall for 80/443 (Cloudflare → origin).
-
 ## `.env` additions
 
 ```

@@ -141,8 +141,10 @@ def create_app():
         # Text files: render inline as plain text.
         if target.suffix.lower() in {".tex", ".bib", ".md", ".txt", ".json", ".py", ".log", ".csv"}:
             return PlainTextResponse(target.read_text(errors="replace"))
-        # Image files: serve inline so <img> tags work in the web UI.
-        if target.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".tiff", ".tif"}:
+        # Raster images: serve inline so <img> tags render in the web UI.
+        # SVG is intentionally excluded — it can contain scripts and would be an
+        # XSS sink if served inline from the app origin with user-supplied content.
+        if target.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"}:
             return FileResponse(target)
         # Other binary: offer as a download.
         return FileResponse(target, filename=target.name)
