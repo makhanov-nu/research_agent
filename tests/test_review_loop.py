@@ -322,11 +322,14 @@ class _Writers:
         self.paper_writer = _FakeWriter(tmp_path / "paper", paper_latexes)
 
 
-async def test_methodology_runner_invalid_revise_valid(tmp_path):
+async def test_methodology_runner_invalid_revise_valid(tmp_path, monkeypatch):
     """validate_methodology returns INVALID on round 1, VALID on round 2;
     summary should say '✓ validated after 1 revision' and two validator task rows
     should appear in the task store.
     """
+    import research_agent.agents.methodology_validator as mv_mod
+    import research_agent.config as config_mod
+
     from research_agent.agents.dispatcher import build_runners
     from research_agent.projects.store import ProjectStore
 
@@ -338,146 +341,122 @@ async def test_methodology_runner_invalid_revise_valid(tmp_path):
             return False, "- Missing ablations"
         return True, ""
 
-    # Patch validation_rounds to 2 for this test.
-    import research_agent.agents.dispatcher as dispatcher_mod
+    monkeypatch.setattr(config_mod.settings, "validation_rounds", 2)
+    monkeypatch.setattr(mv_mod, "validate_methodology", _fake_validate)
+
+    ts = _FakeTaskStore()
+    writers = _Writers(tmp_path)
+    projects = ProjectStore(pool=None, output_dir=str(tmp_path))
+    runners = build_runners(
+        model=None,
+        mcp_tools=["stub"],  # truthy → enables validator
+        writers=writers,
+        consortium=None,
+        projects=projects,
+        task_store=ts,
+    )
+    summary, trace = await runners["methodology"]("design ablation study", "chan-1")
+
+    # Summary should mention revision.
+    assert "✓ validated after 1 revision" in summary
+
+    # Two methodology_validator task rows were created.
+    val_rows = [r for r in ts.rows.values() if r["agent"] == "methodology_validator"]
+    assert len(val_rows) == 2, f"expected 2 validator rows, got {len(val_rows)}: {ts.rows}"
+
+    # The first validator row should be done (not failed).
+    assert val_rows[0]["status"] == "done"
+    assert val_rows[1]["status"] == "done"
+    assert val_rows[1]["result"].startswith("VALID")
+
+    # Methodology writer was called twice (original + revision).
+    assert writers.methodologist._call == 2
+
+    # Critique trace entries should be in the full trace.
+    critique_entries = [e for e in trace if e.get("type") == "critique"
+                        and e.get("verifier") == "methodology_validator"]
+    assert len(critique_entries) == 2
+    assert critique_entries[0]["verdict"] == "invalid"
+    assert critique_entries[1]["verdict"] == "valid"
+
+
+async def test_methodology_runner_validator_error_accepts_draft(tmp_path, monkeypatch):
+    """If validate_methodology raises, the job still completes (no crash)."""
+    import research_agent.agents.methodology_validator as mv_mod
     import research_agent.config as config_mod
 
-    orig_rounds = config_mod.settings.validation_rounds
-    config_mod.settings.__dict__["validation_rounds"] = 2
-
-    import research_agent.agents.methodology_validator as mv_mod
-    orig_validate = mv_mod.validate_methodology
-    mv_mod.validate_methodology = _fake_validate
-
-    try:
-        ts = _FakeTaskStore()
-        writers = _Writers(tmp_path)
-        projects = ProjectStore(pool=None, output_dir=str(tmp_path))
-        runners = build_runners(
-            model=None,
-            mcp_tools=["stub"],  # truthy → enables validator
-            writers=writers,
-            consortium=None,
-            projects=projects,
-            task_store=ts,
-        )
-        summary, trace = await runners["methodology"]("design ablation study", "chan-1")
-
-        # Summary should mention revision.
-        assert "✓ validated after 1 revision" in summary
-
-        # Two methodology_validator task rows were created.
-        val_rows = [r for r in ts.rows.values() if r["agent"] == "methodology_validator"]
-        assert len(val_rows) == 2, f"expected 2 validator rows, got {len(val_rows)}: {ts.rows}"
-
-        # The first validator row should be done (not failed).
-        assert val_rows[0]["status"] == "done"
-        assert val_rows[1]["status"] == "done"
-        assert val_rows[1]["result"].startswith("VALID")
-
-        # Methodology writer was called twice (original + revision).
-        assert writers.methodologist._call == 2
-
-        # Critique trace entries should be in the full trace.
-        critique_entries = [e for e in trace if e.get("type") == "critique"
-                            and e.get("verifier") == "methodology_validator"]
-        assert len(critique_entries) == 2
-        assert critique_entries[0]["verdict"] == "invalid"
-        assert critique_entries[1]["verdict"] == "valid"
-    finally:
-        config_mod.settings.__dict__["validation_rounds"] = orig_rounds
-        mv_mod.validate_methodology = orig_validate
-
-
-async def test_methodology_runner_validator_error_accepts_draft(tmp_path):
-    """If validate_methodology raises, the job still completes (no crash)."""
     from research_agent.agents.dispatcher import build_runners
     from research_agent.projects.store import ProjectStore
-    import research_agent.agents.methodology_validator as mv_mod
-    import research_agent.config as config_mod
-
-    orig_rounds = config_mod.settings.validation_rounds
-    config_mod.settings.__dict__["validation_rounds"] = 2
 
     async def _bad_validate(*args, **kwargs):
         raise RuntimeError("LLM unreachable")
 
-    orig_validate = mv_mod.validate_methodology
-    mv_mod.validate_methodology = _bad_validate
+    monkeypatch.setattr(config_mod.settings, "validation_rounds", 2)
+    monkeypatch.setattr(mv_mod, "validate_methodology", _bad_validate)
 
-    try:
-        ts = _FakeTaskStore()
-        writers = _Writers(tmp_path)
-        projects = ProjectStore(pool=None, output_dir=str(tmp_path))
-        runners = build_runners(
-            model=None,
-            mcp_tools=["stub"],
-            writers=writers,
-            consortium=None,
-            projects=projects,
-            task_store=ts,
-        )
-        # Should not raise.
-        summary, trace = await runners["methodology"]("design study", "chan-2")
-        assert "methodology" in summary.lower()
+    ts = _FakeTaskStore()
+    writers = _Writers(tmp_path)
+    projects = ProjectStore(pool=None, output_dir=str(tmp_path))
+    runners = build_runners(
+        model=None,
+        mcp_tools=["stub"],
+        writers=writers,
+        consortium=None,
+        projects=projects,
+        task_store=ts,
+    )
+    # Should not raise.
+    summary, trace = await runners["methodology"]("design study", "chan-2")
+    assert "methodology" in summary.lower()
 
-        # Validator row should be marked failed.
-        val_rows = [r for r in ts.rows.values() if r["agent"] == "methodology_validator"]
-        assert len(val_rows) == 1
-        assert val_rows[0]["status"] == "failed"
-    finally:
-        config_mod.settings.__dict__["validation_rounds"] = orig_rounds
-        mv_mod.validate_methodology = orig_validate
+    # Validator row should be marked failed.
+    val_rows = [r for r in ts.rows.values() if r["agent"] == "methodology_validator"]
+    assert len(val_rows) == 1
+    assert val_rows[0]["status"] == "failed"
 
 
-async def test_methodology_runner_valid_no_revision(tmp_path):
+async def test_methodology_runner_valid_no_revision(tmp_path, monkeypatch):
     """When validator returns VALID on first pass, summary says '✓ validated' and
     only one validator task row is created.
     """
-    from research_agent.agents.dispatcher import build_runners
-    from research_agent.projects.store import ProjectStore
     import research_agent.agents.methodology_validator as mv_mod
     import research_agent.config as config_mod
 
-    orig_rounds = config_mod.settings.validation_rounds
-    config_mod.settings.__dict__["validation_rounds"] = 2
+    from research_agent.agents.dispatcher import build_runners
+    from research_agent.projects.store import ProjectStore
 
     async def _valid(*args, **kwargs):
         return True, ""
 
-    orig_validate = mv_mod.validate_methodology
-    mv_mod.validate_methodology = _valid
+    monkeypatch.setattr(config_mod.settings, "validation_rounds", 2)
+    monkeypatch.setattr(mv_mod, "validate_methodology", _valid)
 
-    try:
-        ts = _FakeTaskStore()
-        writers = _Writers(tmp_path)
-        projects = ProjectStore(pool=None, output_dir=str(tmp_path))
-        runners = build_runners(
-            model=None, mcp_tools=["stub"], writers=writers,
-            consortium=None, projects=projects, task_store=ts,
-        )
-        summary, trace = await runners["methodology"]("my idea", "chan-3")
-        assert "✓ validated" in summary
-        assert "revision" not in summary
+    ts = _FakeTaskStore()
+    writers = _Writers(tmp_path)
+    projects = ProjectStore(pool=None, output_dir=str(tmp_path))
+    runners = build_runners(
+        model=None, mcp_tools=["stub"], writers=writers,
+        consortium=None, projects=projects, task_store=ts,
+    )
+    summary, trace = await runners["methodology"]("my idea", "chan-3")
+    assert "✓ validated" in summary
+    assert "revision" not in summary
 
-        val_rows = [r for r in ts.rows.values() if r["agent"] == "methodology_validator"]
-        assert len(val_rows) == 1
-        assert writers.methodologist._call == 1
-    finally:
-        config_mod.settings.__dict__["validation_rounds"] = orig_rounds
-        mv_mod.validate_methodology = orig_validate
+    val_rows = [r for r in ts.rows.values() if r["agent"] == "methodology_validator"]
+    assert len(val_rows) == 1
+    assert writers.methodologist._call == 1
 
 
-async def test_citation_critique_in_artifact_runner(tmp_path):
+async def test_citation_critique_in_artifact_runner(tmp_path, monkeypatch):
     """_artifact_runner applies citation critique; a draft with missing citations
     causes exactly one revision and the critique entry appears in the trace.
     """
-    from research_agent.agents.dispatcher import build_runners
-    from research_agent.projects.store import ProjectStore
     import research_agent.config as config_mod
 
-    orig_rounds = config_mod.settings.validation_rounds
-    config_mod.settings.__dict__["validation_rounds"] = 2
+    from research_agent.agents.dispatcher import build_runners
+    from research_agent.projects.store import ProjectStore
+
+    monkeypatch.setattr(config_mod.settings, "validation_rounds", 2)
 
     # First draft has a missing citation; second is clean.
     class _CitingWriter(_FakeWriter):
@@ -489,7 +468,7 @@ async def test_citation_critique_in_artifact_runner(tmp_path):
             self.tasks_received.append(task)
             idx = min(self._call, len(self._missing_seq) - 1)
             missing = self._missing_seq[idx]
-            latex = f"\\section{{A}}~\\cite{{ghost}}" if missing else "\\section{A}"
+            latex = "\\section{A}~\\cite{ghost}" if missing else "\\section{A}"
             self._call += 1
             directory = Path(dirpath) if dirpath else self._tmp
             directory.mkdir(parents=True, exist_ok=True)
@@ -517,20 +496,17 @@ async def test_citation_critique_in_artifact_runner(tmp_path):
         consortium=None, projects=projects,
     )
 
-    try:
-        summary, trace = await runners["literature_review"]("topic", "chan-4")
-        # Two draft calls: original + revision.
-        assert writers.reviewer._call == 2
-        # Revision task contains the REVISION REQUEST prefix.
-        assert "REVISION REQUEST" in writers.reviewer.tasks_received[1]
+    summary, trace = await runners["literature_review"]("topic", "chan-4")
+    # Two draft calls: original + revision.
+    assert writers.reviewer._call == 2
+    # Revision task contains the REVISION REQUEST prefix.
+    assert "REVISION REQUEST" in writers.reviewer.tasks_received[1]
 
-        # citation_check critique entry should be in trace.
-        crit = [e for e in trace if e.get("type") == "critique" and e.get("verifier") == "citation_check"]
-        assert len(crit) == 2  # round 1 invalid, round 2 valid
-        assert crit[0]["verdict"] == "invalid"
-        assert crit[1]["verdict"] == "valid"
-    finally:
-        config_mod.settings.__dict__["validation_rounds"] = orig_rounds
+    # citation_check critique entry should be in trace.
+    crit = [e for e in trace if e.get("type") == "critique" and e.get("verifier") == "citation_check"]
+    assert len(crit) == 2  # round 1 invalid, round 2 valid
+    assert crit[0]["verdict"] == "invalid"
+    assert crit[1]["verdict"] == "valid"
 
 
 async def test_critique_trace_entries_shape():

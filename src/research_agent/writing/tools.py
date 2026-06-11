@@ -65,16 +65,17 @@ async def _gather_material(projects, project, limit: int = 6000) -> str:
     return "\n\n".join(chunks)
 
 
-def build_writing_tools(writers, task_store=None, projects=None, memory=None,
-                        model=None, mcp_tools=None) -> list[BaseTool]:
+def build_writing_tools(writers, task_store=None, projects=None,
+                        memory=None) -> list[BaseTool]:
     """Return writing tools bound to a `Writers` bundle and the project store.
 
     When `memory` is supplied each writer learns: it's primed with relevant
     lessons from past jobs of the same kind, and the finished draft is reflected
     into new lessons (in the background).
 
-    When `model` and `mcp_tools` are supplied the LLM-based verifiers
-    (methodology_validator, paper_verifier) are enabled.
+    These sync tools apply only the rule-based citation critique; the LLM-based
+    verifiers (methodology_validator, paper_verifier) run in the background
+    dispatcher runners (agents/dispatcher.py).
     """
 
     async def _run(agent: str, kind: str, input_text: str, draft_coro_fn, config) -> str:
