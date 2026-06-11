@@ -9,6 +9,7 @@ from __future__ import annotations
 from langchain_core.tools import BaseTool
 
 from ..writing.tools import build_writing_tools
+from .code_reader import build_code_reader_tool
 from .consortium_tool import build_consortium_tool
 from .literature import build_literature_agent_tool
 
@@ -24,6 +25,10 @@ def build_delegated_tools(
     if mcp_tools:
         tools.append(
             build_literature_agent_tool(llm, mcp_tools, task_store, memory, projects)
+        )
+        # Code reader subagent: fetches and analyses GitHub repositories.
+        tools.append(
+            build_code_reader_tool(llm, mcp_tools, task_store, memory, projects)
         )
 
     # LaTeX writers: literature review, methodology, paper draft (each a subagent).

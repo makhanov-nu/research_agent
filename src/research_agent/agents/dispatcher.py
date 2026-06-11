@@ -38,6 +38,7 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
     channel and saves its artifact into that project's folder (registering it),
     so several projects can run agents concurrently without colliding.
     """
+    from .code_reader import build_code_reader_runner
     from .literature import build_literature_runner
 
     runners: dict[str, Runner] = {}
@@ -49,6 +50,13 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
             return await lit(task, channel_id)  # research only; no saved artifact
 
         runners["research_literature"] = _literature
+
+        code = build_code_reader_runner(model, mcp_tools, memory=memory)
+
+        async def _code_reader(task: str, channel_id: str | None) -> tuple[str, list]:
+            return await code(task, channel_id)  # analysis only; no saved artifact
+
+        runners["code_reader"] = _code_reader
 
     def _rel(path: str) -> str:
         from pathlib import Path
