@@ -255,6 +255,13 @@ class Settings(BaseSettings):
                 pass
         return result
 
+    # Automatic fix-and-relaunch after a failed run.
+    # When > 0 the runner will patch the experiment code from the failure logs
+    # and relaunch up to this many times without re-approval.  Retries reuse
+    # the exact same JobSpec / resources, so the original human approval covers
+    # them.  0 disables the feature entirely.
+    experiment_auto_retry: int = Field(2, ge=0)
+
     # Require a human approval in Discord before launching a run.
     experiment_require_approval: bool = True
     # How often (seconds) the job poller checks active runs.
