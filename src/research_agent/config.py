@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     # How often (seconds) the background maintenance loop runs.
     maintenance_interval_seconds: int = 6 * 60 * 60
 
+    # --- Draft → critique → revise loop ---
+    # Total critique passes per artifact (1 = critique only, no revision;
+    # 2 = one revision allowed; <=0 disables critiquing entirely).
+    validation_rounds: int = Field(2, ge=0)
+
     # --- Self-improving lessons (the reflect-and-recall loop) ---
     # Master switch: recall relevant lessons before each subagent job, and reflect
     # the finished job into new lessons afterward.
