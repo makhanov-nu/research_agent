@@ -63,10 +63,8 @@ async def run_review_loop(
         all rounds are exhausted, or if the critique raised an exception).
     """
     max_rounds = rounds if rounds is not None else settings.validation_rounds
-    # A first draft has already been produced by the caller; we only do critique
-    # and possible revision here.  The caller passes us that first draft via
-    # draft_fn being a closure over writer.draft(**kwargs) — we call draft_fn
-    # again only when re-drafting after a failed critique.
+    # Round 1 produces the initial draft; after a failed critique, draft_fn is
+    # re-invoked with the reviewer's feedback prepended to the task.
     current_draft = await draft_fn(task=original_task)
 
     for round_num in range(1, max_rounds + 1):
