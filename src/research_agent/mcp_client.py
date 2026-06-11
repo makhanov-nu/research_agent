@@ -14,6 +14,7 @@ import os
 import re
 from pathlib import Path
 
+import httpx
 from langchain_core.tools import BaseTool
 
 from .config import settings
@@ -21,6 +22,29 @@ from .config import settings
 logger = logging.getLogger(__name__)
 
 _ENV_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def _make_resilient(tool: BaseTool) -> None:
+    """Patch a tool so transport-level HTTP errors return a recoverable string.
+
+    LangGraph's _default_handle_tool_errors only catches ToolException /
+    ToolInvocationError. httpx.HTTPStatusError (e.g. 504 from paperclip) is
+    neither, so it propagates out of the ToolNode and crashes the whole task.
+    We intercept it in ainvoke before LangGraph ever sees it.
+    """
+    tool.handle_tool_error = True
+    orig_ainvoke = tool.ainvoke
+
+    async def _safe_ainvoke(inp, config=None, **kwargs):
+        try:
+            return await orig_ainvoke(inp, config, **kwargs)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            msg = f"MCP server returned HTTP {status}. The server may be temporarily unavailable; try the request again or use a different approach."
+            logger.warning("MCP tool %s HTTP %s error", tool.name, status)
+            return msg
+
+    tool.ainvoke = _safe_ainvoke
 
 
 def _expand_env(obj):
@@ -87,13 +111,8 @@ async def load_mcp_tools() -> list[BaseTool]:
 
     client = MultiServerMCPClient(servers)
     tools = await client.get_tools()
-    # MCP servers surface errors as ToolException. LangGraph's default handler
-    # only catches ToolInvocationError (validation failures), so plain
-    # ToolException propagates out of ainvoke and crashes the task. Setting
-    # handle_tool_error=True on each tool makes BaseTool catch it at the tool
-    # level and return the error string to the LLM so it can retry.
     for t in tools:
-        t.handle_tool_error = True
+        _make_resilient(t)
     logger.info(
         "Loaded %d tool(s) from MCP server(s): %s",
         len(tools),
