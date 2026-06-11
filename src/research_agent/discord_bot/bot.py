@@ -258,12 +258,14 @@ class ResearchBot(discord.Client):
         if self.tasks is not None:
             from ..agents.dispatcher import TaskDispatcher, build_runners
             from ..writing import build_writers
+            from ..llm import get_llm_for_role
 
-            writers = build_writers(get_llm(), mcp_tools, settings.output_dir)
+            writers = build_writers(get_llm(), mcp_tools, settings.output_dir,
+                                   model_for_role=get_llm_for_role)
             runners = build_runners(
                 model=get_llm(), mcp_tools=mcp_tools, writers=writers,
                 consortium=self.consortium, projects=self.projects, memory=self.memory,
-                task_store=self.tasks,
+                task_store=self.tasks, model_for_role=get_llm_for_role,
             )
             self.dispatcher = TaskDispatcher(
                 runners, self.tasks, self._on_task_complete,

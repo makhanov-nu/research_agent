@@ -22,3 +22,46 @@ def test_memory_enabled_tracks_database_url(monkeypatch):
     assert settings.memory_enabled is False
     monkeypatch.setattr(settings, "database_url", "postgresql://x/y")
     assert settings.memory_enabled is True
+
+
+def test_role_model_map_empty_string(monkeypatch):
+    monkeypatch.setattr(settings, "role_models", "")
+    assert settings.role_model_map == {}
+
+
+def test_role_model_map_single_pair(monkeypatch):
+    monkeypatch.setattr(settings, "role_models", "code_reader=qwen/qwen3.7-plus")
+    assert settings.role_model_map == {"code_reader": "qwen/qwen3.7-plus"}
+
+
+def test_role_model_map_multiple_pairs(monkeypatch):
+    monkeypatch.setattr(
+        settings, "role_models",
+        "code_reader=qwen/qwen3.7-plus,methodology=deepseek/deepseek-v4-pro"
+    )
+    assert settings.role_model_map == {
+        "code_reader": "qwen/qwen3.7-plus",
+        "methodology": "deepseek/deepseek-v4-pro",
+    }
+
+
+def test_role_model_map_trims_whitespace(monkeypatch):
+    monkeypatch.setattr(
+        settings, "role_models",
+        "  code_reader  =  qwen/qwen3.7-plus  ,  methodology = deepseek/deepseek-v4-pro  "
+    )
+    assert settings.role_model_map == {
+        "code_reader": "qwen/qwen3.7-plus",
+        "methodology": "deepseek/deepseek-v4-pro",
+    }
+
+
+def test_role_model_map_skips_malformed_pairs(monkeypatch):
+    monkeypatch.setattr(
+        settings, "role_models",
+        "code_reader=qwen/qwen3.7-plus,invalid,=empty,methodology=deepseek/deepseek-v4-pro"
+    )
+    assert settings.role_model_map == {
+        "code_reader": "qwen/qwen3.7-plus",
+        "methodology": "deepseek/deepseek-v4-pro",
+    }

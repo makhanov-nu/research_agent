@@ -198,6 +198,15 @@ class Settings(BaseSettings):
     def web_is_https(self) -> bool:
         return self.web_redirect_uri.startswith("https") or self.web_base_url.startswith("https")
 
+    # --- Per-role model overrides (OpenRouter/DeepInfra only) ---
+    # Comma-separated role=model_slug pairs to override the default model for
+    # specific subagent roles. E.g. "code_reader=qwen/qwen3.7-plus,methodology=deepseek/deepseek-v4-pro".
+    # Known roles: research_literature, code_reader, literature_review, methodology,
+    # methodology_validator, paper_draft, paper_verifier, orchestrator.
+    # Empty string = use default model for all roles. Overrides are ignored on
+    # anthropic/openai providers (requires OpenRouter or DeepInfra).
+    role_models: str = ""
+
     # --- Ideation consortium (two-track scored panel via OpenRouter) ---
     # Comma-separated OpenRouter slugs for the panel — latest reasoning models.
     # (Verify exact slugs on https://openrouter.ai/models.)
@@ -216,6 +225,31 @@ class Settings(BaseSettings):
     @property
     def panel_models(self) -> list[str]:
         return [m.strip() for m in self.consortium_models.split(",") if m.strip()]
+
+    @property
+    def role_model_map(self) -> dict[str, str]:
+        """Parse role_models into a dict of role -> model_slug.
+
+        Format: "role1=slug1,role2=slug2,...". Malformed pairs are silently skipped.
+        Whitespace around roles and slugs is trimmed.
+        """
+        result = {}
+        if not self.role_models:
+            return result
+        for pair in self.role_models.split(","):
+            pair = pair.strip()
+            if not pair or "=" not in pair:
+                continue
+            try:
+                role, slug = pair.split("=", 1)
+                role = role.strip()
+                slug = slug.strip()
+                if role and slug:
+                    result[role] = slug
+            except Exception:  # noqa: BLE001
+                pass
+        return result
+
     # Require a human approval in Discord before launching a run.
     experiment_require_approval: bool = True
     # How often (seconds) the job poller checks active runs.

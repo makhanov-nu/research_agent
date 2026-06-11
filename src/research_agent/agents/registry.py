@@ -18,9 +18,12 @@ from .consortium_tool import build_consortium_tool
 from .literature import build_literature_agent_tool
 
 
-def _build_review_methodology_tool(llm, mcp_tools, output_dir: str, memory=None) -> BaseTool:
+def _build_review_methodology_tool(llm, mcp_tools, output_dir: str, memory=None,
+                                  model_for_role=None) -> BaseTool:
     """Validate an existing methodology file without regenerating it."""
     base = Path(output_dir).resolve()
+    if model_for_role is None:
+        model_for_role = lambda role: llm  # noqa: E731
 
     @tool("review_methodology",
           description=(
@@ -48,7 +51,8 @@ def _build_review_methodology_tool(llm, mcp_tools, output_dir: str, memory=None)
         from .methodology_validator import validate_methodology
         try:
             is_valid, feedback = await validate_methodology(
-                llm, mcp_tools, original_task, methodology_text, memory=memory
+                model_for_role("methodology_validator"), mcp_tools, original_task,
+                methodology_text, memory=memory
             )
         except Exception as exc:
             return f"[review_methodology] Validator error: {exc}"
@@ -94,7 +98,18 @@ def _build_read_artifact_tool(output_dir: str) -> BaseTool:
 def build_delegated_tools(
     *, llm, mcp_tools, writers, experiment_runner=None, consortium=None,
     task_store=None, projects=None, memory=None, output_dir: str = "outputs",
+    model_for_role=None,
 ) -> list[BaseTool]:
+    """Build the orchestrator's delegation tools.
+
+    Args:
+        llm: The default LLM for roles without overrides.
+        model_for_role: Optional callable(role: str) -> BaseChatModel to resolve
+            per-role models. Defaults to a lambda returning llm for all roles.
+    """
+    if model_for_role is None:
+        model_for_role = lambda role: llm  # noqa: E731
+
     tools: list[BaseTool] = []
 
     # Direct file reader — so the orchestrator never delegates "read this file"
@@ -105,16 +120,19 @@ def build_delegated_tools(
     # orchestrator never sees raw search output). `memory` makes it learn.
     if mcp_tools:
         tools.append(
-            build_literature_agent_tool(llm, mcp_tools, task_store, memory, projects)
+            build_literature_agent_tool(model_for_role("research_literature"), mcp_tools,
+                                       task_store, memory, projects)
         )
         # Code reader subagent: fetches and analyses GitHub repositories.
         tools.append(
-            build_code_reader_tool(llm, mcp_tools, task_store, memory, projects)
+            build_code_reader_tool(model_for_role("code_reader"), mcp_tools,
+                                   task_store, memory, projects)
         )
         # Standalone methodology reviewer — validates an existing file without
         # regenerating it. Distinct from design_methodology which writes from scratch.
         tools.append(
-            _build_review_methodology_tool(llm, mcp_tools, output_dir, memory=memory)
+            _build_review_methodology_tool(llm, mcp_tools, output_dir, memory=memory,
+                                          model_for_role=model_for_role)
         )
 
     # LaTeX writers: literature review, methodology, paper draft (each a subagent).
