@@ -4,6 +4,14 @@ Each artifact is saved into the current project's folder
 (`outputs/projects/<slug>/<kind>/`) and registered in the project's artifact
 table, so the web frontend can list and read it. The paper writer gathers the
 project's existing lit review + methodology (+ experiment results) as material.
+
+Every writer runs a bounded draft → critique → revise loop via
+``review_loop.run_review_loop``, applying the rule-based citation critique;
+critique passes are appended to the task trace as ``{"type": "critique", ...}``
+entries — preference-pair training data. The LLM-based verifiers
+(methodology_validator, paper_verifier) do NOT run here: they run in the
+background dispatcher runners (agents/dispatcher.py), which also record each
+verifier run as its own task row in the dashboard.
 """
 
 from __future__ import annotations
@@ -56,15 +64,22 @@ async def _gather_material(projects, project, limit: int = 6000) -> str:
     return "\n\n".join(chunks)
 
 
-def build_writing_tools(writers, task_store=None, projects=None, memory=None) -> list[BaseTool]:
+def build_writing_tools(writers, task_store=None, projects=None,
+                        memory=None) -> list[BaseTool]:
     """Return writing tools bound to a `Writers` bundle and the project store.
 
     When `memory` is supplied each writer learns: it's primed with relevant
     lessons from past jobs of the same kind, and the finished draft is reflected
     into new lessons (in the background).
+
+    These sync tools apply only the rule-based citation critique; the LLM-based
+    verifiers (methodology_validator, paper_verifier) run in the background
+    dispatcher runners (agents/dispatcher.py).
     """
 
     async def _run(agent: str, kind: str, input_text: str, draft_coro_fn, config) -> str:
+        from ..agents.review_loop import citation_critique, run_review_loop
+
         project = await resolve_project(projects, config)
         channel = _channel(config)
         proj_slug = project["slug"] if project else None
@@ -84,8 +99,19 @@ def build_writing_tools(writers, task_store=None, projects=None, memory=None) ->
         if task_store is not None:
             task_id = await task_store.create(agent, input_text, channel)
             await task_store.mark_running(task_id)
+
+        review_trace: list = []
+
+        async def _draft(*, task: str) -> dict:
+            return await draft_coro_fn(dirpath, lessons, task)
+
         try:
-            result = await draft_coro_fn(dirpath, lessons)
+            result = await run_review_loop(
+                original_task=input_text,
+                draft_fn=_draft,
+                critique_fn=citation_critique,
+                trace=review_trace,
+            )
         except Exception as exc:  # noqa: BLE001
             if task_store is not None:
                 await task_store.fail(task_id, str(exc), [])
@@ -111,9 +137,9 @@ def build_writing_tools(writers, task_store=None, projects=None, memory=None) ->
             + warn
         )
         if task_store is not None:
-            # Persist the subagent's full reasoning/tool-call trace, with the saved
-            # artifact (and any dangling citations) appended as a final step.
-            trace = (result.get("trace") or []) + [
+            # Persist the subagent's full reasoning/tool-call trace, with critique
+            # entries and the saved artifact appended as a final step.
+            trace = (result.get("trace") or []) + review_trace + [
                 {"type": "artifact", "tex": result["tex_path"],
                  "bib": result["bib_path"], "n_refs": result["n_refs"],
                  "missing_citations": missing}
@@ -146,10 +172,12 @@ def build_writing_tools(writers, task_store=None, projects=None, memory=None) ->
             venue: Optional target venue/style.
             save_name: Optional base filename; defaults to a slug of the topic.
         """
+        # draft_coro_fn receives (dirpath, lessons, task) where task may be a
+        # revision-prefixed string on subsequent rounds.
         return await _run(
             "literature_review", "lit_review", topic,
-            lambda d, lessons: writers.reviewer.draft(
-                topic, focus=focus, venue=venue, save_name=save_name, dirpath=d,
+            lambda d, lessons, t: writers.reviewer.draft(
+                t, focus=focus, venue=venue, save_name=save_name, dirpath=d,
                 lessons=lessons,
             ),
             config,
@@ -173,8 +201,8 @@ def build_writing_tools(writers, task_store=None, projects=None, memory=None) ->
         """
         return await _run(
             "methodology", "methodology", idea,
-            lambda d, lessons: writers.methodologist.draft(
-                idea, constraints=constraints, venue=venue, save_name=save_name,
+            lambda d, lessons, t: writers.methodologist.draft(
+                t, constraints=constraints, venue=venue, save_name=save_name,
                 dirpath=d, lessons=lessons,
             ),
             config,
@@ -202,8 +230,8 @@ def build_writing_tools(writers, task_store=None, projects=None, memory=None) ->
         gathered = material or await _gather_material(projects, project)
         return await _run(
             "paper_draft", "paper", brief,
-            lambda d, lessons: writers.paper_writer.draft(
-                brief, material=gathered, sections=sections, venue=venue,
+            lambda d, lessons, t: writers.paper_writer.draft(
+                t, material=gathered, sections=sections, venue=venue,
                 save_name=save_name, dirpath=d, lessons=lessons,
             ),
             config,

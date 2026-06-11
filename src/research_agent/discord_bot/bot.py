@@ -263,6 +263,7 @@ class ResearchBot(discord.Client):
             runners = build_runners(
                 model=get_llm(), mcp_tools=mcp_tools, writers=writers,
                 consortium=self.consortium, projects=self.projects, memory=self.memory,
+                task_store=self.tasks,
             )
             self.dispatcher = TaskDispatcher(
                 runners, self.tasks, self._on_task_complete,

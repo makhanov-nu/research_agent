@@ -4,6 +4,14 @@ The orchestrator submits jobs via the dispatch tools; each runs as a background
 asyncio task (bounded by a concurrency limit), records its result + trace to the
 task store, and posts the result to the originating channel when done. This lets
 the orchestrator fan out parallel work and keep chatting while it runs.
+
+Each artifact runner applies a bounded draft → critique → revise loop via
+review_loop.run_review_loop.  Citation gaps are caught by a rule-based check
+(no LLM cost); the methodology writer additionally runs the LLM methodology
+validator; the paper writer additionally runs the paper claims verifier.  Every
+verifier pass is appended to the task trace as a ``{"type": "critique", ...}``
+entry, giving us preference-pair training data (rejected draft + critique +
+accepted revision).
 """
 
 from __future__ import annotations
@@ -31,7 +39,7 @@ OnComplete = Callable[[int, str, str, "str | None"], Awaitable[None]]
 
 
 def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
-                  memory=None) -> dict[str, Runner]:
+                  memory=None, task_store=None) -> dict[str, Runner]:
     """Assemble the dispatchable subagent runners from available resources.
 
     Runners are project-aware: each resolves the project from the originating
@@ -69,7 +77,10 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
             return Path(path).name
 
     def _artifact_runner(writer, label, kind, agent) -> Runner:
+        """Build a runner that drafts, then applies a citation-critique loop."""
         async def _run(task: str, channel_id: str | None) -> tuple[str, list]:
+            from .review_loop import citation_critique, run_review_loop
+
             project = await projects.ensure(channel_id) if projects is not None else None
             proj_slug = project["slug"] if project else None
             dirpath = None
@@ -82,7 +93,21 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
                     lessons = await memory.recall_lessons(task, kind=agent)
                 except Exception:  # noqa: BLE001 — recall must not break the job
                     logger.exception("Lesson recall failed for %s", agent)
-            r = await writer.draft(task, dirpath=dirpath, lessons=lessons)
+
+            full_trace: list = []
+
+            # Wrap writer.draft so the review loop can re-invoke it with a
+            # revised task while keeping dirpath and lessons constant.
+            async def _draft(*, task: str) -> dict:
+                return await writer.draft(task, dirpath=dirpath, lessons=lessons)
+
+            r = await run_review_loop(
+                original_task=task,
+                draft_fn=_draft,
+                critique_fn=citation_critique,
+                trace=full_trace,
+            )
+
             rel = _rel(r["tex_path"])
             tag = f" (project: {project['name']})" if project else ""
             if projects is not None and project is not None and project.get("id"):
@@ -103,8 +128,8 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
                 f"`!getfile {rel}`{warn}"
             )
             # Record the writer's full reasoning/tool-call trace to the dashboard,
-            # with the saved artifact appended as a final step.
-            trace = (r.get("trace") or []) + [
+            # with critique entries and the saved artifact appended.
+            full_trace = (r.get("trace") or []) + full_trace + [
                 {"type": "artifact", "tex": r["tex_path"], "bib": r["bib_path"],
                  "missing_citations": missing}
             ]
@@ -116,22 +141,143 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
                     memory, agent, task, r.get("latex", ""),
                     channel_id=channel_id, project=proj_slug,
                 )
-            return summary, trace
+            return summary, full_trace
 
         return _run
 
     runners["literature_review"] = _artifact_runner(writers.reviewer, "literature review", "lit_review", "literature_review")
-    runners["paper_draft"] = _artifact_runner(writers.paper_writer, "paper draft", "paper", "paper_draft")
 
-    # Methodology has a built-in validate-and-revise loop: after the first
-    # draft, a validator agent checks it against the original task and, if it
-    # finds issues, feeds its comments back to the writer for one more pass.
-    _MAX_VALIDATION_ROUNDS = 2
+    # paper_draft gets an extra paper_verifier pass on top of citation critique.
+    async def _paper_draft(task: str, channel_id: str | None) -> tuple[str, list]:
+        from .review_loop import citation_critique, run_review_loop
+
+        project = await projects.ensure(channel_id) if projects is not None else None
+        proj_slug = project["slug"] if project else None
+        dirpath = projects.kind_dir(project["slug"], "paper") if (
+            projects is not None and project is not None) else None
+
+        lessons = ""
+        if memory is not None and settings.lessons_enabled:
+            try:
+                lessons = await memory.recall_lessons(task, kind="paper_draft")
+            except Exception:  # noqa: BLE001
+                logger.exception("Lesson recall failed for paper_draft")
+
+        full_trace: list = []
+
+        async def _draft(*, task: str) -> dict:
+            return await writers.paper_writer.draft(task, dirpath=dirpath, lessons=lessons)
+
+        r = await run_review_loop(
+            original_task=task,
+            draft_fn=_draft,
+            critique_fn=citation_critique,
+            trace=full_trace,
+        )
+
+        # Paper claims verifier — LLM-based, records its own task row.
+        if mcp_tools and settings.validation_rounds >= 1:
+            from pathlib import Path
+
+            from .paper_verifier import verify_paper
+
+            paper_text = r.get("latex") or Path(r["tex_path"]).read_text(errors="replace")
+            # material was injected into the task string; pass the original task
+            # as brief so the verifier knows what was requested.
+            if task_store is not None:
+                pv_task_id = None
+                try:
+                    pv_task_id = await task_store.create("paper_verifier", task, channel_id)
+                    await task_store.mark_running(pv_task_id)
+                    is_valid, feedback = await verify_paper(
+                        model, mcp_tools, brief=task, material="", paper_text=paper_text,
+                        memory=memory,
+                    )
+                    pv_result = (
+                        "VALID — no fabricated claims detected."
+                        if is_valid else
+                        f"Issues found:\n{feedback}"
+                    )
+                    await task_store.finish(pv_task_id, pv_result, [])
+                    full_trace.append({
+                        "type": "critique",
+                        "round": 1,
+                        "verifier": "paper_verifier",
+                        "verdict": "valid" if is_valid else "invalid",
+                        "feedback": feedback,
+                        "superseded_draft": None if is_valid else r.get("latex", ""),
+                    })
+                    if not is_valid and settings.validation_rounds >= 2:
+                        from .review_loop import _REVISION_PREFIX
+                        revision_task = _REVISION_PREFIX.format(
+                            feedback=feedback, task=task
+                        )
+                        try:
+                            r = await _draft(task=revision_task)
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "Paper revision after verifier failed; keeping draft"
+                            )
+                except Exception:  # noqa: BLE001
+                    logger.exception("Paper verification failed")
+                    if task_store is not None and pv_task_id is not None:
+                        await task_store.fail(pv_task_id, "Verifier raised an exception", [])
+            else:
+                # No task_store — inline verdict only.
+                try:
+                    is_valid, feedback = await verify_paper(
+                        model, mcp_tools, brief=task, material="", paper_text=paper_text,
+                        memory=memory,
+                    )
+                    full_trace.append({
+                        "type": "critique",
+                        "round": 1,
+                        "verifier": "paper_verifier",
+                        "verdict": "valid" if is_valid else "invalid",
+                        "feedback": feedback,
+                        "superseded_draft": None if is_valid else r.get("latex", ""),
+                    })
+                except Exception:  # noqa: BLE001
+                    logger.exception("Paper verification failed (no task_store)")
+
+        rel = _rel(r["tex_path"])
+        tag = f" (project: {project['name']})" if project else ""
+        if projects is not None and project is not None and project.get("id"):
+            from pathlib import Path
+
+            await projects.add_artifact(
+                project["id"], "paper", Path(r["tex_path"]).stem, rel,
+                {"n_refs": r["n_refs"]},
+            )
+        missing = r.get("missing_citations") or []
+        warn = (
+            f" ⚠ {len(missing)} undefined cite(s): "
+            f"{', '.join(missing[:8])}{'…' if len(missing) > 8 else ''}"
+            if missing else ""
+        )
+        summary = (
+            f"Wrote a LaTeX paper draft with {r['n_refs']} references{tag}: "
+            f"`!getfile {rel}`{warn}"
+        )
+        full_trace = (r.get("trace") or []) + full_trace + [
+            {"type": "artifact", "tex": r["tex_path"], "bib": r["bib_path"],
+             "missing_citations": missing}
+        ]
+        if memory is not None:
+            from ..memory.lessons import schedule_reflection
+            schedule_reflection(
+                memory, "paper_draft", task, r.get("latex", ""),
+                channel_id=channel_id, project=proj_slug,
+            )
+        return summary, full_trace
+
+    runners["paper_draft"] = _paper_draft
 
     async def _methodology(task: str, channel_id: str | None) -> tuple[str, list]:
         from pathlib import Path
 
         from .methodology_validator import validate_methodology
+        from .review_loop import citation_critique, run_review_loop
 
         project = await projects.ensure(channel_id) if projects is not None else None
         proj_slug = project["slug"] if project else None
@@ -146,36 +292,92 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
                 logger.exception("Lesson recall failed for methodology")
 
         full_trace: list = []
-        current_task = task
 
-        for attempt in range(_MAX_VALIDATION_ROUNDS):
-            r = await writers.methodologist.draft(current_task, dirpath=dirpath, lessons=lessons)
-            full_trace += r.get("trace") or []
+        async def _draft(*, task: str) -> dict:
+            return await writers.methodologist.draft(task, dirpath=dirpath, lessons=lessons)
 
-            # Validate if we have mcp_tools (needed by the validator subagent).
-            if mcp_tools:
+        # Citation pass first (rule-based, cheap).
+        r = await run_review_loop(
+            original_task=task,
+            draft_fn=_draft,
+            critique_fn=citation_critique,
+            trace=full_trace,
+        )
+
+        # LLM methodology validator — each pass is its own tracked dashboard task.
+        # Track how many validator tasks we create so the summary string is accurate.
+        if mcp_tools and settings.validation_rounds >= 1:
+            methodology_text = r.get("latex") or Path(r["tex_path"]).read_text(errors="replace")
+            last_val_task_id = None
+            revisions_done = 0
+            final_is_valid = False
+
+            for val_round in range(1, settings.validation_rounds + 1):
+                val_task_id = None
                 try:
-                    methodology_text = r.get("latex") or Path(r["tex_path"]).read_text(errors="replace")
+                    if task_store is not None:
+                        val_task_id = await task_store.create(
+                            "methodology_validator", task, channel_id
+                        )
+                        await task_store.mark_running(val_task_id)
                     is_valid, feedback = await validate_methodology(
                         model, mcp_tools, task, methodology_text, memory=memory,
                     )
+                    val_result = (
+                        "VALID — methodology is sound and addresses the original task."
+                        if is_valid else
+                        f"Issues found:\n{feedback}"
+                    )
+                    if task_store is not None and val_task_id is not None:
+                        await task_store.finish(val_task_id, val_result, [])
+                    last_val_task_id = val_task_id
+                    final_is_valid = is_valid
+
+                    full_trace.append({
+                        "type": "critique",
+                        "round": val_round,
+                        "verifier": "methodology_validator",
+                        "verdict": "valid" if is_valid else "invalid",
+                        "feedback": feedback,
+                        "superseded_draft": None if is_valid else r.get("latex", ""),
+                    })
+
+                    if is_valid or val_round >= settings.validation_rounds:
+                        break
+
+                    # Issues found and rounds remain — revise.
+                    from .review_loop import _REVISION_PREFIX
+                    revision_task = _REVISION_PREFIX.format(feedback=feedback, task=task)
+                    try:
+                        r = await _draft(task=revision_task)
+                        methodology_text = r.get("latex") or Path(r["tex_path"]).read_text(errors="replace")
+                        revisions_done += 1
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Methodology revision failed on round %d; keeping draft", val_round
+                        )
+                        break
+
                 except Exception:  # noqa: BLE001
-                    logger.exception("Methodology validation failed; accepting draft as-is")
-                    is_valid, feedback = True, ""
+                    logger.exception("Methodology validation round %d failed", val_round)
+                    if task_store is not None and val_task_id is not None:
+                        await task_store.fail(
+                            val_task_id, "Validator encountered an error", []
+                        )
+                    break  # validator error — accept current draft
+
+            # Build the suffix that goes into the main task summary.
+            if final_is_valid:
+                if revisions_done == 0:
+                    val_suffix = " ✓ validated"
+                else:
+                    val_suffix = f" ✓ validated after {revisions_done} revision{'s' if revisions_done != 1 else ''}"
+            elif last_val_task_id is not None:
+                val_suffix = f" (see validator task #{last_val_task_id} for issues)"
             else:
-                is_valid, feedback = True, ""
-
-            if is_valid or attempt == _MAX_VALIDATION_ROUNDS - 1:
-                break
-
-            # Revise: prepend the validator's comments to the original task.
-            logger.info("Methodology validation round %d: issues found, revising.", attempt + 1)
-            current_task = (
-                f"REVISION REQUEST — a reviewer found the following issues in the "
-                f"previous draft. Fix them while preserving everything else:\n\n"
-                f"{feedback}\n\n"
-                f"ORIGINAL TASK:\n{task}"
-            )
+                val_suffix = " (validation: issues remain)"
+        else:
+            val_suffix = ""
 
         rel = _rel(r["tex_path"])
         tag = f" (project: {project['name']})" if project else ""
@@ -191,15 +393,15 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
             f"{', '.join(missing[:8])}{'…' if len(missing) > 8 else ''}"
             if missing else ""
         )
-        valid_note = " ✓ validated" if is_valid else " (validation skipped)"
         summary = (
-            f"Wrote a LaTeX methodology with {r['n_refs']} references{tag}{valid_note}: "
-            f"`!getfile {rel}`{warn}"
+            f"Wrote a LaTeX methodology with {r['n_refs']} references{tag}: "
+            f"`!getfile {rel}`{warn}{val_suffix}"
         )
-        full_trace.append(
+        full_trace = (r.get("trace") or []) + full_trace + [
             {"type": "artifact", "tex": r["tex_path"], "bib": r["bib_path"],
              "missing_citations": missing}
-        )
+        ]
+
         if memory is not None:
             from ..memory.lessons import schedule_reflection
             schedule_reflection(
