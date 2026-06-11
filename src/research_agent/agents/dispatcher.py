@@ -121,8 +121,94 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
         return _run
 
     runners["literature_review"] = _artifact_runner(writers.reviewer, "literature review", "lit_review", "literature_review")
-    runners["methodology"] = _artifact_runner(writers.methodologist, "methodology", "methodology", "methodology")
     runners["paper_draft"] = _artifact_runner(writers.paper_writer, "paper draft", "paper", "paper_draft")
+
+    # Methodology has a built-in validate-and-revise loop: after the first
+    # draft, a validator agent checks it against the original task and, if it
+    # finds issues, feeds its comments back to the writer for one more pass.
+    _MAX_VALIDATION_ROUNDS = 2
+
+    async def _methodology(task: str, channel_id: str | None) -> tuple[str, list]:
+        from pathlib import Path
+
+        from .methodology_validator import validate_methodology
+
+        project = await projects.ensure(channel_id) if projects is not None else None
+        proj_slug = project["slug"] if project else None
+        dirpath = projects.kind_dir(project["slug"], "methodology") if (
+            projects is not None and project is not None) else None
+
+        lessons = ""
+        if memory is not None and settings.lessons_enabled:
+            try:
+                lessons = await memory.recall_lessons(task, kind="methodology")
+            except Exception:  # noqa: BLE001
+                logger.exception("Lesson recall failed for methodology")
+
+        full_trace: list = []
+        current_task = task
+
+        for attempt in range(_MAX_VALIDATION_ROUNDS):
+            r = await writers.methodologist.draft(current_task, dirpath=dirpath, lessons=lessons)
+            full_trace += r.get("trace") or []
+
+            # Validate if we have mcp_tools (needed by the validator subagent).
+            if mcp_tools:
+                try:
+                    methodology_text = r.get("latex") or Path(r["tex_path"]).read_text(errors="replace")
+                    is_valid, feedback = await validate_methodology(
+                        model, mcp_tools, task, methodology_text, memory=memory,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("Methodology validation failed; accepting draft as-is")
+                    is_valid, feedback = True, ""
+            else:
+                is_valid, feedback = True, ""
+
+            if is_valid or attempt == _MAX_VALIDATION_ROUNDS - 1:
+                break
+
+            # Revise: prepend the validator's comments to the original task.
+            logger.info("Methodology validation round %d: issues found, revising.", attempt + 1)
+            current_task = (
+                f"REVISION REQUEST — a reviewer found the following issues in the "
+                f"previous draft. Fix them while preserving everything else:\n\n"
+                f"{feedback}\n\n"
+                f"ORIGINAL TASK:\n{task}"
+            )
+
+        rel = _rel(r["tex_path"])
+        tag = f" (project: {project['name']})" if project else ""
+        if projects is not None and project is not None and project.get("id"):
+            await projects.add_artifact(
+                project["id"], "methodology", Path(r["tex_path"]).stem, rel,
+                {"n_refs": r["n_refs"]},
+            )
+
+        missing = r.get("missing_citations") or []
+        warn = (
+            f" ⚠ {len(missing)} undefined cite(s): "
+            f"{', '.join(missing[:8])}{'…' if len(missing) > 8 else ''}"
+            if missing else ""
+        )
+        valid_note = " ✓ validated" if is_valid else " (validation skipped)"
+        summary = (
+            f"Wrote a LaTeX methodology with {r['n_refs']} references{tag}{valid_note}: "
+            f"`!getfile {rel}`{warn}"
+        )
+        full_trace.append(
+            {"type": "artifact", "tex": r["tex_path"], "bib": r["bib_path"],
+             "missing_citations": missing}
+        )
+        if memory is not None:
+            from ..memory.lessons import schedule_reflection
+            schedule_reflection(
+                memory, "methodology", task, r.get("latex", ""),
+                channel_id=channel_id, project=proj_slug,
+            )
+        return summary, full_trace
+
+    runners["methodology"] = _methodology
 
     if consortium is not None:
         async def _consortium(task: str, channel_id: str | None) -> tuple[str, list]:
