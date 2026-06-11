@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     # When empty, memory is disabled and the bot falls back to in-process state.
     database_url: str = ""
     # Embedder for mem0 (Anthropic has no embeddings API). Reads OPENAI_API_KEY.
+    # deepinfra provider: set EMBEDDING_MODEL=BAAI/bge-m3 + EMBEDDING_DIMS=1024
+    # openrouter / openai: set EMBEDDING_MODEL=text-embedding-3-small + EMBEDDING_DIMS=1536
     openai_api_key: str = ""
     embedding_model: str = "text-embedding-3-small"
     embedding_dims: int = 1536

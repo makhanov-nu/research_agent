@@ -21,14 +21,15 @@ logger = logging.getLogger(__name__)
 def _embedder_block() -> dict:
     """mem0 embedder config.
 
-    OpenRouter exposes an OpenAI-compatible embeddings endpoint. Both openrouter
-    and deepinfra providers route embeddings through OpenRouter (reusing the
-    OpenRouter key) since DeepInfra's embedding models use different dimensions.
-    text-embedding-3-small is 1536-dim either way, so no collection migration needed.
+    openrouter: OpenRouter's OpenAI-compatible embeddings endpoint
+                (model slug needs openai/ prefix for OpenAI models).
+    deepinfra:  DeepInfra's own embeddings endpoint — use EMBEDDING_MODEL /
+                EMBEDDING_DIMS in .env to pick the model (e.g. BAAI/bge-m3 / 1024).
+    other:      bare OpenAI API (OPENAI_API_KEY required).
     """
     provider = settings.llm_provider.lower()
     model = settings.embedding_model
-    if provider in ("openrouter", "deepinfra"):
+    if provider == "openrouter":
         return {
             "provider": "openai",
             "config": {
@@ -36,6 +37,16 @@ def _embedder_block() -> dict:
                 "embedding_dims": settings.embedding_dims,
                 "api_key": settings.openrouter_api_key,
                 "openai_base_url": settings.openrouter_base_url,
+            },
+        }
+    if provider == "deepinfra":
+        return {
+            "provider": "openai",
+            "config": {
+                "model": model,
+                "embedding_dims": settings.embedding_dims,
+                "api_key": settings.deepinfra_api_key,
+                "openai_base_url": settings.deepinfra_base_url,
             },
         }
     return {
@@ -100,8 +111,11 @@ def _build_config() -> dict:
 
 def _has_embedder_credentials() -> bool:
     """True when we have a key for the embeddings endpoint in use."""
-    if settings.llm_provider.lower() in ("openrouter", "deepinfra"):
+    provider = settings.llm_provider.lower()
+    if provider == "openrouter":
         return bool(settings.openrouter_api_key)
+    if provider == "deepinfra":
+        return bool(settings.deepinfra_api_key)
     return bool(settings.openai_api_key or _openai_key_in_env())
 
 
