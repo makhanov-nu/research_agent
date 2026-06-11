@@ -94,6 +94,11 @@ class Settings(BaseSettings):
     reflection_model: str = "qwen/qwen3.7-plus"
     # Max lessons to extract per job.
     reflection_max_lessons: int = Field(3, ge=1)
+    # How many candidates to fetch before re-ranking recall (multiplier × limit).
+    lesson_recall_oversample: int = Field(3, ge=1)
+    # Maintenance: merge near-duplicate lessons when per-kind count exceeds this.
+    lesson_consolidation_enabled: bool = True
+    max_lessons_per_kind: int = Field(200, ge=10)
 
     # --- Experiment compute node (registered via config) ---
     # SSH target for the GPU box. When host+user are empty, the runner is off.

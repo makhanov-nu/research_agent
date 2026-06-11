@@ -175,25 +175,39 @@ class SemanticMemory:
             logger.exception("Semantic memory write failed.")
 
     def add_fact(self, text: str, source: str | None = None,
-                 metadata: dict | None = None, infer: bool = False) -> None:
+                 metadata: dict | None = None, infer: bool = False) -> str | None:
         """Store a single fact/lesson VERBATIM (infer=False) with provenance.
 
         Used for consolidated lessons/insights we don't want mem0 to re-extract
         or paraphrase — e.g. an experiment failure lesson or a council insight.
+
+        Returns the mem0 memory id on success, or None on failure/disabled.
         """
         if not self.enabled:
-            return
+            return None
         meta = {"as_of": datetime.now(timezone.utc).isoformat()}
         if source:
             meta["source"] = source
         if metadata:
             meta.update(metadata)
         try:
-            self._mem.add(
+            result = self._mem.add(
                 text, user_id=settings.memory_user_id, metadata=meta, infer=infer
             )
+            # mem0 returns {"results": [{"id": ..., ...}, ...]} or a list
+            return _extract_first_id(result)
         except Exception:  # noqa: BLE001
             logger.exception("Semantic fact write failed.")
+            return None
+
+    def delete_fact(self, memory_id: str) -> None:
+        """Delete a single memory entry by id. Best-effort, no-op if disabled."""
+        if not self.enabled or not memory_id:
+            return
+        try:
+            self._mem.delete(memory_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Semantic fact delete failed for id=%s.", memory_id)
 
     def recall(self, query: str, limit: int = 5, only_type: str | None = None,
                only_kind: str | None = None) -> str:
@@ -203,39 +217,115 @@ class SemanticMemory:
         match (e.g. type="lesson", kind="literature"); filtered client-side so it
         works across mem0 versions. When filtering, we over-fetch then trim.
         """
+        text_lines, _ = self._recall_inner(
+            query, limit, only_type, only_kind, score_map=None
+        )
+        return "\n".join(text_lines)
+
+    def recall_with_ids(
+        self,
+        query: str,
+        limit: int = 5,
+        only_type: str | None = None,
+        only_kind: str | None = None,
+        score_map: dict[str, float] | None = None,
+    ) -> tuple[str, list[str]]:
+        """Like recall() but also returns the mem0 ids of the returned items.
+
+        `score_map` is an optional {memory_id: float} prior used to re-rank the
+        candidates (e.g. Laplace-smoothed quality score from LessonStats). When
+        provided, candidates are fetched at 3× the requested limit, sorted by
+        blended score (0.5 * vector_relevance + 0.5 * quality_prior), and the
+        top `limit` are returned.  Blending weights are equal and arbitrary — this
+        is a soft prior only, not a calibrated ranker.
+
+        Returns (formatted_block: str, ids: list[str]).
+        """
+        text_lines, ids = self._recall_inner(
+            query, limit, only_type, only_kind, score_map=score_map
+        )
+        return "\n".join(text_lines), ids
+
+    def _recall_inner(
+        self,
+        query: str,
+        limit: int,
+        only_type: str | None,
+        only_kind: str | None,
+        score_map: dict[str, float] | None,
+    ) -> tuple[list[str], list[str]]:
+        """Shared implementation for recall() and recall_with_ids()."""
         query = query.replace("\x00", "")
         if not self.enabled:
-            return ""
+            return [], []
         scoped = only_type or only_kind
+        # Over-fetch when we need to filter or re-rank.
+        fetch_limit = limit * 3 if (scoped or score_map) else limit
         try:
-            # mem0 2.x: scope by user via filters (top-level user_id is rejected).
             res = self._mem.search(
                 query, filters={"user_id": settings.memory_user_id},
-                limit=limit * 3 if scoped else limit,
+                limit=fetch_limit,
             )
         except Exception:  # noqa: BLE001
             logger.exception("Semantic memory search failed.")
-            return ""
+            return [], []
 
-        results = res.get("results", res) if isinstance(res, dict) else res
-        lines = []
-        for item in results or []:
+        raw = res.get("results", res) if isinstance(res, dict) else res
+        # Filter first (cheap), then re-rank with score_map if provided.
+        candidates: list[tuple[str, str, float]] = []  # (text_line, id, relevance)
+        for idx, item in enumerate(raw or []):
             meta = item.get("metadata") or {}
             if only_type and meta.get("type") != only_type:
                 continue
             if only_kind and meta.get("kind") != only_kind:
                 continue
             text = item.get("memory") or item.get("text") or ""
+            if not text:
+                continue
             src = meta.get("source")
             cite = f" [source: {src}]" if src else ""
-            if text:
-                lines.append(f"- {text}{cite}")
-            if len(lines) >= limit:
-                break
-        return "\n".join(lines)
+            line = f"- {text}{cite}"
+            mem_id = item.get("id") or ""
+            # mem0 may include a relevance/score field; fall back to rank-based.
+            rel = item.get("score") or item.get("relevance") or max(0.0, 1.0 - idx * 0.1)
+            candidates.append((line, mem_id, float(rel)))
+
+        if score_map and candidates:
+            # Blend vector relevance with quality prior using equal weights.
+            candidates.sort(
+                key=lambda c: 0.5 * c[2] + 0.5 * score_map.get(c[1], 0.5),
+                reverse=True,
+            )
+
+        top = candidates[:limit]
+        return [c[0] for c in top], [c[1] for c in top]
 
 
 def _openai_key_in_env() -> bool:
     import os
 
     return bool(os.environ.get("OPENAI_API_KEY"))
+
+
+def _extract_first_id(result) -> str | None:
+    """Best-effort extraction of the first memory id from a mem0 add() response.
+
+    mem0 returns varying shapes across versions:
+      - {"results": [{"id": "...", ...}]}   (2.x)
+      - [{"id": "..."}]                     (some builds)
+      - {"id": "..."}                       (older 1.x)
+    Returns None when no id can be found so callers degrade gracefully.
+    """
+    if not result:
+        return None
+    if isinstance(result, dict):
+        if "id" in result:
+            return str(result["id"])
+        results = result.get("results") or []
+        if results and isinstance(results[0], dict):
+            return str(results[0].get("id", "")) or None
+    if isinstance(result, list) and result:
+        first = result[0]
+        if isinstance(first, dict):
+            return str(first.get("id", "")) or None
+    return None

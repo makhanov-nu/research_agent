@@ -27,6 +27,31 @@ from ..config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _outcome_from_trace(trace: list, missing_citations: list) -> str | None:
+    """Derive a job outcome signal from the critique trace and citation gaps.
+
+    Rules (in priority order):
+    - Any critique entry with verdict "invalid" → "bad" (the job had verifiable
+      problems; pitfall extraction will help future jobs avoid them).
+    - No invalid verdicts AND no missing citations → "good" (clean pass).
+    - No critique entries at all → None (no signal; use neutral prompt).
+
+    This is a CONSERVATIVE heuristic: when in doubt we return None so the
+    normal "what worked" prompt is used rather than incorrectly labelling a
+    job bad.
+    """
+    critique_entries = [e for e in trace if e.get("type") == "critique"]
+    if not critique_entries:
+        return None
+    if any(e.get("verdict") == "invalid" for e in critique_entries):
+        return "bad"
+    if not missing_citations:
+        return "good"
+    # Citations missing but no invalid verdict — ambiguous; no signal.
+    return None
+
+
 # The dispatcher is GLOBAL (one pool across all projects), so a runner is given
 # the originating channel and routes its output into THAT channel's project.
 # A runner maps (task, channel_id) -> (result, trace).
@@ -98,9 +123,10 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
                 dirpath = projects.kind_dir(project["slug"], kind)
             # Prime with relevant lessons from past jobs of this kind.
             lessons = ""
+            lesson_ids: list[str] = []
             if memory is not None and settings.lessons_enabled:
                 try:
-                    lessons = await memory.recall_lessons(task, kind=agent)
+                    lessons, lesson_ids = await memory.recall_lessons_with_ids(task, kind=agent)
                 except Exception:  # noqa: BLE001 — recall must not break the job
                     logger.exception("Lesson recall failed for %s", agent)
 
@@ -143,6 +169,9 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
                 {"type": "artifact", "tex": r["tex_path"], "bib": r["bib_path"],
                  "missing_citations": missing}
             ]
+            # Derive outcome from citation-check trace: valid + no missing cites
+            # → "good"; final verdict invalid → "bad"; otherwise no signal.
+            outcome = _outcome_from_trace(full_trace, missing)
             # Reflect the finished draft into durable lessons (background).
             if memory is not None:
                 from ..memory.lessons import schedule_reflection
@@ -150,6 +179,7 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
                 schedule_reflection(
                     memory, agent, task, r.get("latex", ""),
                     channel_id=channel_id, project=proj_slug,
+                    outcome=outcome, lesson_ids=lesson_ids,
                 )
             return summary, full_trace
 
@@ -167,9 +197,10 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
             projects is not None and project is not None) else None
 
         lessons = ""
+        paper_lesson_ids: list[str] = []
         if memory is not None and settings.lessons_enabled:
             try:
-                lessons = await memory.recall_lessons(task, kind="paper_draft")
+                lessons, paper_lesson_ids = await memory.recall_lessons_with_ids(task, kind="paper_draft")
             except Exception:  # noqa: BLE001
                 logger.exception("Lesson recall failed for paper_draft")
 
@@ -273,11 +304,13 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
             {"type": "artifact", "tex": r["tex_path"], "bib": r["bib_path"],
              "missing_citations": missing}
         ]
+        paper_outcome = _outcome_from_trace(full_trace, missing)
         if memory is not None:
             from ..memory.lessons import schedule_reflection
             schedule_reflection(
                 memory, "paper_draft", task, r.get("latex", ""),
                 channel_id=channel_id, project=proj_slug,
+                outcome=paper_outcome, lesson_ids=paper_lesson_ids,
             )
         return summary, full_trace
 
@@ -295,9 +328,10 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
             projects is not None and project is not None) else None
 
         lessons = ""
+        meth_lesson_ids: list[str] = []
         if memory is not None and settings.lessons_enabled:
             try:
-                lessons = await memory.recall_lessons(task, kind="methodology")
+                lessons, meth_lesson_ids = await memory.recall_lessons_with_ids(task, kind="methodology")
             except Exception:  # noqa: BLE001
                 logger.exception("Lesson recall failed for methodology")
 
@@ -413,11 +447,13 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
              "missing_citations": missing}
         ]
 
+        meth_outcome = _outcome_from_trace(full_trace, missing)
         if memory is not None:
             from ..memory.lessons import schedule_reflection
             schedule_reflection(
                 memory, "methodology", task, r.get("latex", ""),
                 channel_id=channel_id, project=proj_slug,
+                outcome=meth_outcome, lesson_ids=meth_lesson_ids,
             )
         return summary, full_trace
 
