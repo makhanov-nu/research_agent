@@ -6,13 +6,12 @@ table, so the web frontend can list and read it. The paper writer gathers the
 project's existing lit review + methodology (+ experiment results) as material.
 
 Every writer runs a bounded draft → critique → revise loop via
-``review_loop.run_review_loop``:
-  - Citation critique (rule-based) applies to all three writers.
-  - design_methodology additionally runs the LLM methodology validator.
-  - draft_paper additionally runs the paper claims verifier.
-Verifier passes are appended to the task trace as ``{"type": "critique", ...}``
-entries — preference-pair training data — and each LLM verifier run is recorded
-as its own task row in the dashboard.
+``review_loop.run_review_loop``, applying the rule-based citation critique;
+critique passes are appended to the task trace as ``{"type": "critique", ...}``
+entries — preference-pair training data. The LLM-based verifiers
+(methodology_validator, paper_verifier) do NOT run here: they run in the
+background dispatcher runners (agents/dispatcher.py), which also record each
+verifier run as its own task row in the dashboard.
 """
 
 from __future__ import annotations
