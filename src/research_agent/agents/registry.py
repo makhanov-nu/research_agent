@@ -150,19 +150,9 @@ def build_delegated_tools(
 
     # Experiment tools (lightweight, return concise status strings).
     if experiment_runner is not None and getattr(experiment_runner, "enabled", False):
-        from ..config import settings
-        from ..experiments.coder import ExperimentCoder
+        from ..experiments.coder import build_default_coder
         from ..experiments.tools import build_experiment_tools
 
-        coder = None
-        if settings.openrouter_api_key:
-            from ..llm import build_openrouter_chat
-
-            coder = ExperimentCoder(
-                build_openrouter_chat(
-                    settings.experiment_coder_model, temperature=0.2, max_tokens=16384
-                )
-            )
-        tools += build_experiment_tools(experiment_runner, coder=coder)
+        tools += build_experiment_tools(experiment_runner, coder=build_default_coder())
 
     return tools

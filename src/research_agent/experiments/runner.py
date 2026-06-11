@@ -74,13 +74,16 @@ def read_latest_metrics(artifact_dir: str) -> dict:
 
 class ExperimentRunner:
     def __init__(self, episodic, backend, workspace, artifacts_dir: str,
-                 projects=None, memory=None):
+                 projects=None, memory=None, coder=None):
         self.episodic = episodic
         self.backend = backend
         self.workspace = workspace
         self.artifacts_dir = artifacts_dir
         self.projects = projects
         self.memory = memory  # MemoryManager: lessons (record/recall) loop
+        # Optional ExperimentCoder used for auto-retry code patching.  When
+        # None and auto_retry is enabled, build_default_coder() is tried lazily.
+        self._coder = coder
 
     @property
     def enabled(self) -> bool:
@@ -248,7 +251,13 @@ class ExperimentRunner:
         exp = await self.episodic.get_experiment(experiment_id)
         if exp is None:
             return f"Experiment #{experiment_id} not found."
-        return f"Experiment #{experiment_id} ({exp['title']}): {exp['status']}, metrics={exp.get('metrics')}"
+        cfg = exp.get("config") or {}
+        retry_count = int(cfg.get("auto_retry_count") or 0)
+        retry_info = f", auto_retries={retry_count}" if retry_count > 0 else ""
+        return (
+            f"Experiment #{experiment_id} ({exp['title']}): "
+            f"{exp['status']}, metrics={exp.get('metrics')}{retry_info}"
+        )
 
     async def mlflow_summary(self, experiment_id: int) -> str:
         """Fetch the experiment's MLflow run (params + latest metrics) on demand."""
@@ -376,15 +385,36 @@ class ExperimentRunner:
             )
         await self.episodic.update_experiment(exp_id, **fields)
         await self._record_to_project(exp, dest, state, metrics, cfg)
+
+        # Auto-retry: if the run failed (not cancelled, not timed-out) and the
+        # retry budget allows it, patch the code from logs and relaunch without
+        # re-approval.  The retry gate is checked inside _maybe_auto_retry so
+        # this call is always safe to make.
+        if state == JobState.FAILED.value:
+            retry_change = await self._maybe_auto_retry(exp, cfg, handle, state, timed_out)
+            if retry_change is not None:
+                # A retry was launched: report it and stop — do NOT run
+                # _consolidate_outcome (the run is not definitively done yet).
+                return retry_change
+
         reason = (
             f"exceeded its {self._time_limit(cfg)}-minute wall-clock limit"
             if timed_out else ""
         )
         await self._consolidate_outcome(exp, handle, state, metrics, reason=reason)
+
+        # Include retry count in the success message when retries were needed.
+        retry_count = int(cfg.get("auto_retry_count") or 0)
+        retry_suffix = (
+            f" (succeeded after {retry_count} auto-retr{'y' if retry_count == 1 else 'ies'})"
+            if retry_count > 0 and state == JobState.SUCCEEDED.value
+            else ""
+        )
         msg = (
             f"Experiment #{exp_id} ({exp['title']}) {state}"
             + (" (timed out)" if timed_out else "")
             + (f" metrics: {metrics}" if metrics else "")
+            + retry_suffix
         )
         return StateChange(
             experiment_id=exp_id, channel_id=exp.get("channel_id"),
@@ -418,6 +448,148 @@ class ExperimentRunner:
             started_dt = started_dt.replace(tzinfo=timezone.utc)
         elapsed_min = (datetime.now(timezone.utc) - started_dt).total_seconds() / 60
         return limit if elapsed_min > limit else None
+
+    def _get_coder(self):
+        """Return the configured coder, or try to build one from settings."""
+        if self._coder is not None:
+            return self._coder
+        # Lazy construction so the runner doesn't depend on LLM credentials
+        # being present at construction time.
+        try:
+            from .coder import build_default_coder
+            return build_default_coder()
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not build default coder for auto-retry")
+            return None
+
+    async def _maybe_auto_retry(
+        self, exp: dict, cfg: dict, handle, state: str, timed_out: bool
+    ) -> "StateChange | None":
+        """Attempt a bounded automatic fix-and-relaunch after a failed run.
+
+        Returns a StateChange (meaning: a retry was launched; the poller
+        should report THIS message and stop) or None (meaning: fall through
+        to normal failure handling).
+
+        Safety invariants enforced here:
+        - Never retries a CANCELLED run (only failed, non-timeout).
+        - Never modifies the JobSpec: the same image/command/resources are
+          reused — only the workspace code files change.
+        - Hard cap from settings.experiment_auto_retry; counter persisted in
+          config JSONB so the cap survives restarts.
+        - Every retry is logged via episodic.log_action for dashboard visibility.
+        - Any exception inside this path is caught; the caller falls through to
+          the normal failure path unchanged.
+        """
+        exp_id = exp["id"]
+
+        # Gate 1: feature must be enabled globally.
+        if settings.experiment_auto_retry <= 0:
+            return None
+        # Gate 2: only failed runs (not cancelled, not timed-out).
+        if state != JobState.FAILED.value or timed_out:
+            return None
+        # Gate 3: retry counter must be below the cap.
+        auto_retry_count = int(cfg.get("auto_retry_count") or 0)
+        if auto_retry_count >= settings.experiment_auto_retry:
+            return None
+        # Gate 4: a coder must be available.
+        coder = self._get_coder()
+        if coder is None:
+            return None
+
+        try:
+            attempt = auto_retry_count + 1
+            cap = settings.experiment_auto_retry
+
+            # 1. Fetch failure logs (best-effort; empty string is tolerated by revise()).
+            logs = ""
+            try:
+                logs = await self.backend.logs(handle, tail=200)
+            except Exception:  # noqa: BLE001
+                logger.exception("Auto-retry: could not fetch logs for exp %s", exp_id)
+
+            # 2. Recall failure lessons from memory (best-effort).
+            lessons = ""
+            if self.memory is not None:
+                try:
+                    lessons = await self.memory.recall_lessons(
+                        exp.get("title") or f"experiment #{exp_id}", kind="experiment"
+                    ) or ""
+                except Exception:  # noqa: BLE001
+                    logger.exception("Auto-retry: lesson recall failed for exp %s", exp_id)
+
+            # 3. Read current workspace files.
+            current_files: dict[str, str] = {}
+            ws_root = self.workspace.path_for(exp_id)
+            for rel in self.workspace.list_files(exp_id):
+                try:
+                    current_files[rel] = (ws_root / rel).read_text(errors="replace")
+                except Exception:  # noqa: BLE001
+                    pass
+
+            # 4. Ask the coder to produce a patched file set.
+            spec_str = (cfg.get("plan") or exp.get("title") or f"experiment #{exp_id}")
+            fixed_files = await coder.revise(spec_str, current_files, logs, lessons)
+
+            # 5. Write the patched files into the workspace.
+            await self.write_code(exp_id, fixed_files)
+
+            # 6. Increment counter and relaunch with the SAME JobSpec (immutability
+            #    guaranteed: we rebuild the spec from cfg which has not changed).
+            cfg["auto_retry_count"] = attempt
+            await self.episodic.update_experiment(exp_id, config=cfg, status="running")
+
+            res = cfg.get("resources", {})
+            spec = JobSpec(
+                experiment_id=exp_id,
+                image=cfg["image"],
+                command=cfg["command"],
+                env=_launch_env(exp_id, cfg.get("env", {})),
+                resources=Resources(
+                    gpus=res.get("gpus", ""),
+                    memory=res.get("memory", ""),
+                    pids_limit=res.get("pids_limit", 0),
+                    time_limit_minutes=res.get("time_limit_minutes", 0),
+                ),
+            )
+            workspace_local = str(self.workspace.path_for(exp_id))
+            new_handle = await self.backend.submit(spec, workspace_local)
+
+            cfg["handle"] = new_handle.to_dict()
+            cfg["started_at"] = datetime.now(timezone.utc).isoformat()
+            await self.episodic.update_experiment(exp_id, config=cfg, status="running")
+            await self.episodic.log_action(
+                "experiment_auto_retry",
+                f"exp {exp_id} retry {attempt}/{cap} — patched from logs, relaunched",
+                metadata={
+                    "experiment_id": exp_id,
+                    "attempt": attempt,
+                    "cap": cap,
+                    "handle": new_handle.to_dict(),
+                },
+            )
+            msg = (
+                f"Experiment #{exp_id} ({exp['title']}) failed → "
+                f"auto-retry {attempt}/{cap} launched (patched from logs)"
+            )
+            logger.info(msg)
+            return StateChange(
+                experiment_id=exp_id,
+                channel_id=exp.get("channel_id"),
+                title=exp["title"],
+                state="auto_retry",
+                message=msg,
+            )
+
+        except Exception:  # noqa: BLE001
+            # Any error in the retry path must not swallow the real failure.
+            logger.exception(
+                "Auto-retry attempt failed for experiment %s; falling through to "
+                "normal failure handling",
+                exp_id,
+            )
+            return None
 
     async def _consolidate_outcome(self, exp, handle, state, metrics, reason: str = "") -> None:
         """Turn an experiment outcome into a durable, reusable lesson.
