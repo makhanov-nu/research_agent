@@ -50,7 +50,7 @@ async def run_subagent(
     from ..memory.lessons import prime_with_lessons, schedule_reflection
     from .middleware import TaskRecorderMiddleware
 
-    primed = await prime_with_lessons(memory, agent_kind, task)
+    primed, lesson_ids = await prime_with_lessons(memory, agent_kind, task)
     recorder = TaskRecorderMiddleware()
     agent = create_agent(
         model, tools, system_prompt=system_prompt, middleware=[recorder]
@@ -61,7 +61,11 @@ async def run_subagent(
     )
     result = flatten_content(state["messages"][-1].content)
     schedule_reflection(
-        memory, agent_kind, task, result, channel_id=channel_id, project=project
+        memory, agent_kind, task, result,
+        channel_id=channel_id, project=project,
+        lesson_ids=lesson_ids,
+        # subagent.py has no critique verdict signal — outcome stays None so
+        # the normal "what worked" prompt is used.
     )
     return result, recorder.trace
 
