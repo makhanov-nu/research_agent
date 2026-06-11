@@ -362,21 +362,31 @@ class ResearchBot(discord.Client):
         event = (
             f"[BACKGROUND TASK COMPLETE] #{task_id} ({agent}){proj_tag} — {status}.\n\n"
             f"{payload}\n\n"
-            "This is an automated event (not from the researcher). Incorporate "
-            "this result with the ongoing work, reply with what matters, and "
-            "dispatch any useful follow-ups. If nothing needs saying, reply 'OK'."
+            "This is an automated event (not from the researcher). The researcher "
+            "has already been notified of the result. Add context, propose next "
+            "steps, or dispatch follow-up work if relevant. If nothing needs to "
+            "be added, reply 'OK'."
         )
         thread_id = str(channel_id)
         config = {"configurable": {"thread_id": thread_id}}
 
-        # Failures always get a direct notification so the user isn't left
-        # wondering — don't rely on the orchestrator to volunteer bad news.
+        # Always send a direct notification (success or failure) so the user is
+        # never left wondering. Don't rely solely on the orchestrator for this —
+        # it might reply "OK" and suppress the message, leaving the thread silent.
         if status == "failed":
             error_summary = (row.get("error") or "unknown error") if row else "task not found"
             await self._notify_channel(
                 channel_id, f"❌ Task #{task_id} ({agent}){proj_tag} failed: {error_summary}"
             )
             return
+
+        # Send a compact success notice immediately so the user knows the task
+        # finished, then let the orchestrator add context / next steps.
+        task_result = row.get("result") or "(no result recorded)" if row else "(result unavailable)"
+        await self._notify_channel(
+            channel_id,
+            f"✅ Task #{task_id} ({agent}){proj_tag} done.\n{task_result}",
+        )
 
         try:
             async with self._channel_locks.get(thread_id):
@@ -386,11 +396,10 @@ class ResearchBot(discord.Client):
             reply = _flatten(result["messages"][-1].content).strip()
         except Exception:  # noqa: BLE001
             logger.exception("Orchestrator failed handling completion of #%s", task_id)
-            await self._notify_channel(
-                channel_id, f"Task #{task_id} ({agent}) {status}, but I hit an error processing it."
-            )
             return
-        if reply and reply.upper() != "OK":
+        # Only relay the orchestrator's follow-up if it adds something beyond
+        # a bare acknowledgement (the direct notice above already confirmed success).
+        if reply and reply.upper() not in ("OK", "OK.", "DONE", "DONE."):
             await self._notify_channel(channel_id, reply)
 
     async def on_message(self, message: discord.Message) -> None:
