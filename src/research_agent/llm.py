@@ -7,9 +7,13 @@ Supported providers: "openrouter", "deepinfra", "anthropic", "openai".
 
 from __future__ import annotations
 
+import logging
+
 from langchain_core.language_models import BaseChatModel
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _openai_compat(
@@ -92,5 +96,40 @@ def build_reflection_llm() -> BaseChatModel:
     if provider in ("openrouter", "deepinfra"):
         return build_openrouter_chat(
             settings.reflection_model, temperature=0.2, max_tokens=512
+        )
+    return get_llm()
+
+
+_warned_providers = set()
+
+
+def get_llm_for_role(role: str) -> BaseChatModel:
+    """Get the LLM for a specific role, applying overrides from ROLE_MODELS.
+
+    If ROLE_MODELS has an entry for the role AND the provider is OpenRouter or
+    DeepInfra, return a model using the specified slug with default temperature
+    and max_tokens. Otherwise, return the default LLM.
+
+    Role overrides are only meaningful on OpenAI-compatible providers; they are
+    silently ignored on anthropic/openai (logged once per process).
+    """
+    role_map = settings.role_model_map
+    if role not in role_map:
+        return get_llm()
+
+    provider = settings.llm_provider.lower()
+    if provider in ("openrouter", "deepinfra"):
+        return build_openrouter_chat(
+            role_map[role], temperature=settings.llm_temperature,
+            max_tokens=settings.llm_max_tokens
+        )
+
+    # Warn once per provider that overrides are not applicable.
+    if provider not in _warned_providers:
+        _warned_providers.add(provider)
+        logger.warning(
+            "ROLE_MODELS is set but LLM_PROVIDER=%s does not support per-role "
+            "overrides (only 'openrouter' and 'deepinfra' do); falling back to "
+            "the default model for all roles.", provider
         )
     return get_llm()

@@ -62,14 +62,16 @@ async def build_graph(
 
     from ..agents import build_delegated_tools
     from ..writing import build_writers
+    from ..llm import get_llm_for_role
 
     llm = get_llm()
-    writers = build_writers(get_llm(), mcp_tools, settings.output_dir)
+    writers = build_writers(get_llm(), mcp_tools, settings.output_dir,
+                           model_for_role=get_llm_for_role)
     tools = build_delegated_tools(
         llm=get_llm(), mcp_tools=mcp_tools, writers=writers,
         experiment_runner=experiment_runner, consortium=consortium,
         task_store=task_store, projects=projects, memory=memory,
-        output_dir=settings.output_dir,
+        output_dir=settings.output_dir, model_for_role=get_llm_for_role,
     )
     if dispatcher is not None:
         from ..agents.dispatcher import build_dispatch_tools

@@ -21,12 +21,23 @@ class Writers:
     paper_writer: PaperWriter
 
 
-def build_writers(llm, tools, output_dir: str) -> Writers:
-    """Construct the LaTeX writers, all sharing the LLM and literature tools."""
+def build_writers(llm, tools, output_dir: str, model_for_role=None) -> Writers:
+    """Construct the LaTeX writers, all sharing the literature tools.
+
+    Args:
+        llm: The default LLM for roles without overrides.
+        tools: The literature/MCP tools available to the writers.
+        output_dir: Directory for saving artifacts.
+        model_for_role: Optional callable(role: str) -> BaseChatModel to resolve
+            per-role models. Defaults to a lambda returning llm for all roles.
+    """
+    if model_for_role is None:
+        model_for_role = lambda role: llm  # noqa: E731
+
     return Writers(
-        reviewer=LiteratureReviewer(llm, tools, output_dir),
-        methodologist=MethodologyWriter(llm, tools, output_dir),
-        paper_writer=PaperWriter(llm, tools, output_dir),
+        reviewer=LiteratureReviewer(model_for_role("literature_review"), tools, output_dir),
+        methodologist=MethodologyWriter(model_for_role("methodology"), tools, output_dir),
+        paper_writer=PaperWriter(model_for_role("paper_draft"), tools, output_dir),
     )
 
 

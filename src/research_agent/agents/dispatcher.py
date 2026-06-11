@@ -39,27 +39,37 @@ OnComplete = Callable[[int, str, str, "str | None"], Awaitable[None]]
 
 
 def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
-                  memory=None, task_store=None) -> dict[str, Runner]:
+                  memory=None, task_store=None, model_for_role=None) -> dict[str, Runner]:
     """Assemble the dispatchable subagent runners from available resources.
 
     Runners are project-aware: each resolves the project from the originating
     channel and saves its artifact into that project's folder (registering it),
     so several projects can run agents concurrently without colliding.
+
+    Args:
+        model: The default LLM for roles without overrides.
+        model_for_role: Optional callable(role: str) -> BaseChatModel to resolve
+            per-role models. Defaults to a lambda returning model for all roles.
     """
+    if model_for_role is None:
+        model_for_role = lambda role: model  # noqa: E731
+
     from .code_reader import build_code_reader_runner
     from .literature import build_literature_runner
 
     runners: dict[str, Runner] = {}
 
     if mcp_tools:
-        lit = build_literature_runner(model, mcp_tools, memory=memory)
+        lit = build_literature_runner(model_for_role("research_literature"), mcp_tools,
+                                      memory=memory)
 
         async def _literature(task: str, channel_id: str | None) -> tuple[str, list]:
             return await lit(task, channel_id)  # research only; no saved artifact
 
         runners["research_literature"] = _literature
 
-        code = build_code_reader_runner(model, mcp_tools, memory=memory)
+        code = build_code_reader_runner(model_for_role("code_reader"), mcp_tools,
+                                        memory=memory)
 
         async def _code_reader(task: str, channel_id: str | None) -> tuple[str, list]:
             return await code(task, channel_id)  # analysis only; no saved artifact
@@ -190,8 +200,8 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
                     pv_task_id = await task_store.create("paper_verifier", task, channel_id)
                     await task_store.mark_running(pv_task_id)
                     is_valid, feedback = await verify_paper(
-                        model, mcp_tools, brief=task, material="", paper_text=paper_text,
-                        memory=memory,
+                        model_for_role("paper_verifier"), mcp_tools, brief=task,
+                        material="", paper_text=paper_text, memory=memory,
                     )
                     pv_result = (
                         "VALID — no fabricated claims detected."
@@ -226,8 +236,8 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
                 # No task_store — inline verdict only.
                 try:
                     is_valid, feedback = await verify_paper(
-                        model, mcp_tools, brief=task, material="", paper_text=paper_text,
-                        memory=memory,
+                        model_for_role("paper_verifier"), mcp_tools, brief=task,
+                        material="", paper_text=paper_text, memory=memory,
                     )
                     full_trace.append({
                         "type": "critique",
@@ -321,7 +331,8 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
                         )
                         await task_store.mark_running(val_task_id)
                     is_valid, feedback = await validate_methodology(
-                        model, mcp_tools, task, methodology_text, memory=memory,
+                        model_for_role("methodology_validator"), mcp_tools, task,
+                        methodology_text, memory=memory,
                     )
                     val_result = (
                         "VALID — methodology is sound and addresses the original task."
