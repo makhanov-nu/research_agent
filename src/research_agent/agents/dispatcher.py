@@ -12,12 +12,38 @@ validator; the paper writer additionally runs the paper claims verifier.  Every
 verifier pass is appended to the task trace as a ``{"type": "critique", ...}``
 entry, giving us preference-pair training data (rejected draft + critique +
 accepted revision).
+
+Artifact / task piping
+----------------------
+dispatch_task (and TaskDispatcher.dispatch) accept two optional reference lists:
+
+  * input_artifacts — paths relative to output_dir; each file is read and
+    appended to the task string before the runner is invoked.
+  * input_tasks — ids of COMPLETED task rows whose ``result`` is appended.
+
+Content is injected with clearly-labelled delimiters and a shared character
+budget (``settings.dispatch_input_budget_chars``).  Missing files or non-done
+tasks are rejected before dispatch so the orchestrator can react early rather
+than letting a half-injected job silently proceed.
+
+The original (un-augmented) task string is stored as the task row's ``input``
+column; the injected content is only in the runner's call, so the dashboard
+stays clean.  A ``{"type": "inputs", ...}`` entry is appended to the final
+trace for auditability.
+
+Linear pipelines
+----------------
+TaskDispatcher accepts an optional ``pipelines`` PipelineStore.  After every
+task reaches a terminal state the dispatcher checks whether the task belongs to
+a pipeline and, if so, calls the pipeline advancement helpers from pipeline.py.
+The dispatcher itself stays thin; all pipeline logic lives in pipeline.py.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Awaitable, Callable
 
 from langchain_core.runnables import RunnableConfig
@@ -26,6 +52,92 @@ from langchain_core.tools import BaseTool, tool
 from ..config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Input resolution helpers (artifact + task piping)
+# ---------------------------------------------------------------------------
+
+def _resolve_artifact_path(rel_path: str, output_dir: str) -> Path | str:
+    """Resolve an artifact path relative to output_dir; reject traversals.
+
+    Returns a Path if valid, or an error string if the path is rejected or the
+    file does not exist.
+    """
+    base = Path(output_dir).resolve()
+    try:
+        target = (base / rel_path).resolve()
+        target.relative_to(base)  # raises ValueError on traversal
+    except (ValueError, Exception) as exc:
+        return f"[piping] Path rejected (traversal or invalid): {rel_path!r} — {exc}"
+    if not target.exists():
+        return f"[piping] Artifact not found: {rel_path!r}"
+    return target
+
+
+def _build_injected_task(
+    original_task: str,
+    input_artifacts: list[str] | None,
+    input_tasks_data: list[tuple[int, str]] | None,
+    budget: int,
+) -> tuple[str, list[str], list[int]]:
+    """Compose the augmented task string from original task + piped inputs.
+
+    Returns (augmented_task, artifact_paths_used, task_ids_used).
+    Blocks are appended in artifact order then task order.
+    Content that would exceed the budget is truncated with an explicit marker.
+    """
+    blocks: list[str] = []
+    used_artifacts: list[str] = []
+    used_task_ids: list[int] = []
+    remaining = budget
+
+    for path in (input_artifacts or []):
+        header = f"\n\n=== INPUT (artifact: {path}) ===\n"
+        cap = remaining - len(header)
+        if cap <= 0:
+            blocks.append(header + "…[truncated: input budget exhausted]")
+            used_artifacts.append(path)
+            remaining = 0
+            break
+        target = _resolve_artifact_path(path, settings.output_dir)
+        if isinstance(target, str):
+            # Already an error string — caller should have caught this; skip silently.
+            continue
+        try:
+            content = target.read_text(errors="replace")
+        except Exception as exc:
+            content = f"[piping] Could not read file: {exc}"
+        if len(content) > cap:
+            content = content[:cap] + f"\n…[truncated; {len(content)} chars total]"
+            remaining = 0
+        else:
+            remaining -= len(content)
+        blocks.append(header + content)
+        used_artifacts.append(path)
+        if remaining <= 0:
+            break
+
+    for tid, result in (input_tasks_data or []):
+        header = f"\n\n=== INPUT (task #{tid} result) ===\n"
+        cap = remaining - len(header)
+        if cap <= 0:
+            blocks.append(header + "…[truncated: input budget exhausted]")
+            used_task_ids.append(tid)
+            remaining = 0
+            break
+        if len(result) > cap:
+            result = result[:cap] + f"\n…[truncated; {len(result)} chars total]"
+            remaining = 0
+        else:
+            remaining -= len(result)
+        blocks.append(header + result)
+        used_task_ids.append(tid)
+        if remaining <= 0:
+            break
+
+    augmented = original_task + "".join(blocks)
+    return augmented, used_artifacts, used_task_ids
 
 
 def _outcome_from_trace(trace: list, missing_citations: list) -> str | None:
@@ -485,44 +597,154 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
 
 class TaskDispatcher:
     def __init__(self, runners: dict[str, Runner], task_store, on_complete: OnComplete,
-                 max_parallel: int = 4):
+                 max_parallel: int = 4, pipelines=None):
         self._runners = runners
         self.task_store = task_store
         self._on_complete = on_complete
         self._sem = asyncio.Semaphore(max_parallel)
         self._running: dict[int, asyncio.Task] = {}
+        # Optional PipelineStore — when present, task completions advance pipelines.
+        self._pipelines = pipelines
 
     @property
     def agents(self) -> list[str]:
         return list(self._runners)
 
-    async def dispatch(self, agent: str, task: str, channel_id: str | None) -> int:
+    async def dispatch(
+        self,
+        agent: str,
+        task: str,
+        channel_id: str | None,
+        input_artifacts: list[str] | None = None,
+        input_tasks: list[int] | None = None,
+    ) -> int:
+        """Dispatch a task to a runner, optionally piping artifact/task inputs.
+
+        Args:
+            agent: runner key (must exist in self._runners).
+            task: the original task string (stored as-is in the task row).
+            channel_id: originating channel.
+            input_artifacts: paths relative to output_dir whose content is
+                prepended to the runner's task string.
+            input_tasks: ids of COMPLETED task rows whose result is prepended.
+
+        Returns:
+            The task row id.
+
+        Raises:
+            ValueError: unknown agent, unresolvable artifact, or non-done task.
+        """
         if agent not in self._runners:
             raise ValueError(
                 f"Unknown agent {agent!r}. Available: {', '.join(self.agents)}."
             )
+
+        # --- validate and pre-read inputs ---
+        artifact_errors: list[str] = []
+        task_inputs_data: list[tuple[int, str]] = []
+
+        if input_artifacts:
+            for rel_path in input_artifacts:
+                result = _resolve_artifact_path(rel_path, settings.output_dir)
+                if isinstance(result, str):
+                    artifact_errors.append(result)
+            if artifact_errors:
+                raise ValueError(
+                    "Cannot dispatch: " + "; ".join(artifact_errors)
+                )
+
+        if input_tasks:
+            for tid in input_tasks:
+                row = await self.task_store.get(tid)
+                if row is None:
+                    raise ValueError(
+                        f"Cannot dispatch: task #{tid} not found in the dashboard."
+                    )
+                if row.get("status") != "done":
+                    raise ValueError(
+                        f"Cannot dispatch: task #{tid} is not done "
+                        f"(status={row.get('status')!r})."
+                    )
+                task_inputs_data.append((tid, row.get("result") or ""))
+
+        # Store the ORIGINAL task string in the row (clean dashboard).
         task_id = await self.task_store.create(agent, task, channel_id)
-        bg = asyncio.create_task(self._run(task_id, agent, task, channel_id))
+
+        # Build the augmented task that the runner will actually see.
+        augmented_task, used_artifacts, used_task_ids = _build_injected_task(
+            task,
+            input_artifacts,
+            task_inputs_data,
+            budget=settings.dispatch_input_budget_chars,
+        )
+
+        bg = asyncio.create_task(
+            self._run(task_id, agent, augmented_task, channel_id,
+                      used_artifacts, used_task_ids)
+        )
         if task_id is not None:
             self._running[task_id] = bg
         return task_id
 
-    async def _run(self, task_id, agent, task, channel_id) -> None:
+    async def _run(
+        self, task_id, agent, task, channel_id,
+        used_artifacts=None, used_task_ids=None,
+    ) -> None:
         async with self._sem:
             await self.task_store.mark_running(task_id)
             try:
                 result, trace = await self._runners[agent](task, channel_id)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Dispatched task %s (%s) failed", task_id, agent)
-                # Record the failure to the dashboard, THEN trigger the handler.
                 await self.task_store.fail(task_id, str(exc), [])
+                await self._advance_pipeline(task_id, "failed", channel_id)
                 await self._fire(task_id, agent, "failed", channel_id)
                 return
             finally:
                 self._running.pop(task_id, None)
+            # Append an inputs trace entry when content was piped in.
+            if used_artifacts or used_task_ids:
+                trace = list(trace) + [{
+                    "type": "inputs",
+                    "artifacts": used_artifacts or [],
+                    "tasks": used_task_ids or [],
+                }]
             # Write the result to the dashboard FIRST so the handler can read it.
             await self.task_store.finish(task_id, result, trace)
+            await self._advance_pipeline(task_id, "done", channel_id)
             await self._fire(task_id, agent, "done", channel_id)
+
+    async def _advance_pipeline(
+        self, task_id: int | None, status: str, channel_id: str | None
+    ) -> None:
+        """Hook into the pipeline store after a task reaches a terminal state.
+
+        Best-effort: any exception is logged and swallowed so pipeline errors
+        never interfere with normal task completion.
+        """
+        if task_id is None or self._pipelines is None:
+            return
+        try:
+            pipeline = await self._pipelines.find_by_task(task_id)
+            if pipeline is None:
+                return
+            # Attach the store reference so the helper can call it.
+            pipeline["_store"] = self._pipelines
+
+            from .pipeline import on_stage_failure, on_stage_success
+
+            if status == "done":
+                async def _dispatch_next(agent, task, ch_id, input_task_ids):
+                    return await self.dispatch(
+                        agent, task, ch_id, input_tasks=input_task_ids
+                    )
+                await on_stage_success(pipeline, task_id, _dispatch_next)
+            else:
+                await on_stage_failure(pipeline)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Pipeline advancement failed after task #%s (%s)", task_id, status
+            )
 
     async def _fire(self, task_id, agent, status, channel_id) -> None:
         """Trigger the completion handler (never raises). Carries no result —
@@ -543,6 +765,11 @@ class TaskDispatcher:
 
 
 def build_dispatch_tools(dispatcher: TaskDispatcher) -> list[BaseTool]:
+    """Build the orchestrator tools that expose the background dispatcher.
+
+    Returns dispatch_task, and — when the dispatcher has a pipeline store —
+    also run_pipeline and pipeline_status.
+    """
     agents = ", ".join(dispatcher.agents) or "(none)"
 
     def _channel(config: RunnableConfig | None) -> str | None:
@@ -561,17 +788,143 @@ def build_dispatch_tools(dispatcher: TaskDispatcher) -> list[BaseTool]:
             "delivered back to you automatically as a '[BACKGROUND TASK COMPLETE]' "
             "event for you to process. Use this for heavy or multiple parallel "
             "jobs (dispatch several to run them at once); for a quick single "
-            "lookup, call the direct tool instead."
+            "lookup, call the direct tool instead.\n\n"
+            "ARTIFACT / TASK PIPING — instead of copy-pasting prior outputs into "
+            "the task string, pass references:\n"
+            "  • input_artifacts: list of paths relative to the output dir "
+            "(e.g. ['projects/my-project/methodology/design.tex']) — the file "
+            "contents are injected into the task before the runner is called.\n"
+            "  • input_tasks: list of integer task ids whose results should be "
+            "piped in (those tasks MUST be done; pass their ids from earlier "
+            "'[BACKGROUND TASK COMPLETE]' events).\n"
+            "Both are optional. For a known multi-stage flow "
+            "(lit review → methodology → paper) prefer run_pipeline instead."
         ),
     )
-    async def dispatch_task(agent: str, task: str, config: RunnableConfig = None) -> str:
+    async def dispatch_task(
+        agent: str,
+        task: str,
+        input_artifacts: list[str] | None = None,
+        input_tasks: list[int] | None = None,
+        config: RunnableConfig = None,
+    ) -> str:
         try:
-            task_id = await dispatcher.dispatch(agent, task, _channel(config))
+            task_id = await dispatcher.dispatch(
+                agent, task, _channel(config),
+                input_artifacts=input_artifacts,
+                input_tasks=input_tasks,
+            )
         except ValueError as exc:
             return str(exc)
+        pipes = []
+        if input_artifacts:
+            pipes.append(f"{len(input_artifacts)} artifact(s)")
+        if input_tasks:
+            pipes.append(f"result(s) of task(s) {input_tasks}")
+        piped = f" (piping {', '.join(pipes)})" if pipes else ""
         return (
-            f"Dispatched task #{task_id} to `{agent}` in the background. "
+            f"Dispatched task #{task_id} to `{agent}` in the background{piped}. "
             f"Its result will be delivered to you automatically when it finishes."
         )
 
-    return [dispatch_task]
+    tools: list[BaseTool] = [dispatch_task]
+
+    # Pipeline tools — only when the dispatcher has a pipeline store.
+    if dispatcher._pipelines is not None:
+        pipelines = dispatcher._pipelines
+
+        @tool(
+            "run_pipeline",
+            description=(
+                "Create and start a LINEAR multi-stage pipeline. Each stage runs "
+                "after the previous one completes, automatically receiving the "
+                "previous stage's result. Use this for known sequential flows such "
+                "as 'literature review → methodology → paper' instead of manually "
+                "chaining dispatch_task calls.\n\n"
+                f"`stages` is a JSON list of objects with 'agent' (one of: {agents}) "
+                "and 'task' (the instruction for that stage). Stage 0 is dispatched "
+                "immediately; subsequent stages are dispatched automatically.\n\n"
+                "Returns the pipeline id and the stage-0 task id. Use "
+                "pipeline_status(pipeline_id) to inspect progress."
+            ),
+        )
+        async def run_pipeline(
+            name: str, stages: list[dict], config: RunnableConfig = None
+        ) -> str:
+            if not pipelines.enabled:
+                return (
+                    "Pipelines require DATABASE_URL to be configured. "
+                    "Use dispatch_task for individual steps instead."
+                )
+            # Validate every agent up front.
+            unknown = [
+                s.get("agent", "") for s in stages
+                if s.get("agent", "") not in dispatcher.agents
+            ]
+            if unknown:
+                return (
+                    f"Unknown agent(s) in pipeline stages: {unknown}. "
+                    f"Available: {', '.join(dispatcher.agents)}."
+                )
+            if not stages:
+                return "Pipeline must have at least one stage."
+
+            channel_id = _channel(config)
+            # Build the stage list with task_id=null placeholders.
+            stage_rows = [
+                {"agent": s["agent"], "task": s["task"], "task_id": None}
+                for s in stages
+            ]
+            pipeline_id = await pipelines.create(name, stage_rows, channel_id)
+            if pipeline_id is None:
+                return "Failed to create pipeline (database error)."
+
+            # Dispatch stage 0 immediately (no inputs yet).
+            try:
+                task_id = await dispatcher.dispatch(
+                    stages[0]["agent"], stages[0]["task"], channel_id
+                )
+            except ValueError as exc:
+                await pipelines.set_status(pipeline_id, "failed")
+                return f"Failed to dispatch stage 0: {exc}"
+
+            await pipelines.record_stage_task(pipeline_id, 0, task_id)
+            return (
+                f"Pipeline #{pipeline_id} '{name}' started with {len(stages)} stage(s). "
+                f"Stage 0 dispatched as task #{task_id}. "
+                f"Use pipeline_status({pipeline_id}) to track progress."
+            )
+
+        @tool(
+            "pipeline_status",
+            description=(
+                "Return the current status of a pipeline created with run_pipeline. "
+                "Shows each stage (agent, task, dispatched task id, completion) and "
+                "the overall pipeline status (queued|running|failed|done)."
+            ),
+        )
+        async def pipeline_status(pipeline_id: int) -> str:
+            if not pipelines.enabled:
+                return "Pipelines require DATABASE_URL."
+            row = await pipelines.get(pipeline_id)
+            if row is None:
+                return f"Pipeline #{pipeline_id} not found."
+            stages = row.get("stages") or []
+            lines = [
+                f"Pipeline #{pipeline_id} '{row['name']}' — status: {row['status']}",
+                f"Current stage: {row['current_stage']}",
+                "",
+                "Stages:",
+            ]
+            for i, stage in enumerate(stages):
+                tid = stage.get("task_id")
+                tid_str = f"task #{tid}" if tid is not None else "not yet dispatched"
+                lines.append(
+                    f"  [{i}] agent={stage.get('agent')} | {tid_str} | "
+                    f"task={stage.get('task', '')[:80]}"
+                )
+            return "\n".join(lines)
+
+        tools += [run_pipeline, pipeline_status]
+
+    return tools
