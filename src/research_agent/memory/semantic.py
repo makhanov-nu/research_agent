@@ -21,14 +21,14 @@ logger = logging.getLogger(__name__)
 def _embedder_block() -> dict:
     """mem0 embedder config.
 
-    OpenRouter exposes an OpenAI-compatible embeddings endpoint, so when the
-    provider is OpenRouter we route embeddings there too (reusing the OpenRouter
-    key) and normalize the slug to ``openai/<model>``. text-embedding-3-small is
-    1536-dim either way, so the pgvector collection needs no migration.
+    OpenRouter exposes an OpenAI-compatible embeddings endpoint. Both openrouter
+    and deepinfra providers route embeddings through OpenRouter (reusing the
+    OpenRouter key) since DeepInfra's embedding models use different dimensions.
+    text-embedding-3-small is 1536-dim either way, so no collection migration needed.
     """
     provider = settings.llm_provider.lower()
     model = settings.embedding_model
-    if provider == "openrouter":
+    if provider in ("openrouter", "deepinfra"):
         return {
             "provider": "openai",
             "config": {
@@ -100,9 +100,8 @@ def _build_config() -> dict:
 
 def _has_embedder_credentials() -> bool:
     """True when we have a key for the embeddings endpoint in use."""
-    if settings.llm_provider.lower() == "openrouter":
+    if settings.llm_provider.lower() in ("openrouter", "deepinfra"):
         return bool(settings.openrouter_api_key)
-    # DeepInfra doesn't serve text-embedding-3-small; embeddings stay on OpenAI.
     return bool(settings.openai_api_key or _openai_key_in_env())
 
 
