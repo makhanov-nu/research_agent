@@ -69,6 +69,7 @@ async def build_graph(
         llm=get_llm(), mcp_tools=mcp_tools, writers=writers,
         experiment_runner=experiment_runner, consortium=consortium,
         task_store=task_store, projects=projects, memory=memory,
+        output_dir=settings.output_dir,
     )
     if dispatcher is not None:
         from ..agents.dispatcher import build_dispatch_tools
