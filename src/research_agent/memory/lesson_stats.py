@@ -91,7 +91,9 @@ class LessonStats:
         """
         if not self.enabled or not lesson_ids or outcome not in ("good", "bad"):
             return
-        col = outcome  # "good" or "bad" — matches column names exactly
+        # Explicit allowlist mapping outcome -> column, so the f-string SQL
+        # below can never interpolate anything else.
+        col = {"good": "good", "bad": "bad"}[outcome]
         try:
             async with self.pool.connection() as conn:
                 for lid in lesson_ids:

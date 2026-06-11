@@ -148,7 +148,7 @@ async def _consolidate_kind(memory, llm, kind: str) -> int:
         kind,           # only_kind
         None,           # no score_map — this is maintenance, not job recall
     )
-    text_block, all_ids = raw
+    _text_block, all_ids = raw
     if len(all_ids) <= cap:
         return 0
 
@@ -160,9 +160,12 @@ async def _consolidate_kind(memory, llm, kind: str) -> int:
     )
     full_text_block, full_ids = raw_full
     # Parse the text block back into per-lesson lines.
-    lines = [l.lstrip("- ").strip() for l in full_text_block.splitlines() if l.strip()]
+    lines = [
+        line.lstrip("- ").strip()
+        for line in full_text_block.splitlines() if line.strip()
+    ]
     # Zip ids with lines; fall back gracefully if counts differ.
-    pairs = list(zip(full_ids, lines))
+    pairs = list(zip(full_ids, lines, strict=False))
     if not pairs:
         return 0
 

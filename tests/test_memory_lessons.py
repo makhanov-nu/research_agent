@@ -206,7 +206,7 @@ class _LoopMem:
 
     async def reflect_and_record(self, kind, task, result, *, channel_id=None,
                                  project=None, outcome=None):
-        self.reflected.append((kind, task, result, channel_id, project))
+        self.reflected.append((kind, task, result, channel_id, project, outcome))
 
     async def credit_lessons(self, lesson_ids, outcome):
         self.credited.append((lesson_ids, outcome))
@@ -251,7 +251,9 @@ async def test_schedule_reflection_runs_in_background():
         if mem.reflected:
             break
         await asyncio.sleep(0.005)
-    assert mem.reflected == [("literature", "task text", "result text", "c1", "p1")]
+    assert mem.reflected == [
+        ("literature", "task text", "result text", "c1", "p1", None)
+    ]
 
 
 @pytest.mark.asyncio
