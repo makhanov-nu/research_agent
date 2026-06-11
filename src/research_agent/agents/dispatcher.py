@@ -31,7 +31,7 @@ OnComplete = Callable[[int, str, str, "str | None"], Awaitable[None]]
 
 
 def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
-                  memory=None) -> dict[str, Runner]:
+                  memory=None, task_store=None) -> dict[str, Runner]:
     """Assemble the dispatchable subagent runners from available resources.
 
     Runners are project-aware: each resolves the project from the originating
@@ -123,11 +123,6 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
     runners["literature_review"] = _artifact_runner(writers.reviewer, "literature review", "lit_review", "literature_review")
     runners["paper_draft"] = _artifact_runner(writers.paper_writer, "paper draft", "paper", "paper_draft")
 
-    # Methodology has a built-in validate-and-revise loop: after the first
-    # draft, a validator agent checks it against the original task and, if it
-    # finds issues, feeds its comments back to the writer for one more pass.
-    _MAX_VALIDATION_ROUNDS = 2
-
     async def _methodology(task: str, channel_id: str | None) -> tuple[str, list]:
         from pathlib import Path
 
@@ -145,37 +140,8 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
             except Exception:  # noqa: BLE001
                 logger.exception("Lesson recall failed for methodology")
 
-        full_trace: list = []
-        current_task = task
-
-        for attempt in range(_MAX_VALIDATION_ROUNDS):
-            r = await writers.methodologist.draft(current_task, dirpath=dirpath, lessons=lessons)
-            full_trace += r.get("trace") or []
-
-            # Validate if we have mcp_tools (needed by the validator subagent).
-            if mcp_tools:
-                try:
-                    methodology_text = r.get("latex") or Path(r["tex_path"]).read_text(errors="replace")
-                    is_valid, feedback = await validate_methodology(
-                        model, mcp_tools, task, methodology_text, memory=memory,
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.exception("Methodology validation failed; accepting draft as-is")
-                    is_valid, feedback = True, ""
-            else:
-                is_valid, feedback = True, ""
-
-            if is_valid or attempt == _MAX_VALIDATION_ROUNDS - 1:
-                break
-
-            # Revise: prepend the validator's comments to the original task.
-            logger.info("Methodology validation round %d: issues found, revising.", attempt + 1)
-            current_task = (
-                f"REVISION REQUEST — a reviewer found the following issues in the "
-                f"previous draft. Fix them while preserving everything else:\n\n"
-                f"{feedback}\n\n"
-                f"ORIGINAL TASK:\n{task}"
-            )
+        r = await writers.methodologist.draft(task, dirpath=dirpath, lessons=lessons)
+        full_trace = r.get("trace") or []
 
         rel = _rel(r["tex_path"])
         tag = f" (project: {project['name']})" if project else ""
@@ -191,15 +157,53 @@ def build_runners(*, model, mcp_tools, writers, consortium, projects=None,
             f"{', '.join(missing[:8])}{'…' if len(missing) > 8 else ''}"
             if missing else ""
         )
-        valid_note = " ✓ validated" if is_valid else " (validation skipped)"
         summary = (
-            f"Wrote a LaTeX methodology with {r['n_refs']} references{tag}{valid_note}: "
+            f"Wrote a LaTeX methodology with {r['n_refs']} references{tag}: "
             f"`!getfile {rel}`{warn}"
         )
         full_trace.append(
             {"type": "artifact", "tex": r["tex_path"], "bib": r["bib_path"],
              "missing_citations": missing}
         )
+
+        # Validator runs as its own tracked task so it appears separately in the
+        # dashboard. When task_store is unavailable (local dev), fall back to
+        # appending the verdict inline.
+        if mcp_tools:
+            methodology_text = r.get("latex") or Path(r["tex_path"]).read_text(errors="replace")
+            if task_store is not None:
+                val_task_id = None
+                try:
+                    val_task_id = await task_store.create(
+                        "methodology_validator", task, channel_id
+                    )
+                    await task_store.mark_running(val_task_id)
+                    is_valid, feedback = await validate_methodology(
+                        model, mcp_tools, task, methodology_text, memory=memory,
+                    )
+                    val_result = (
+                        "VALID — methodology is sound and addresses the original task."
+                        if is_valid else
+                        f"Issues found:\n{feedback}"
+                    )
+                    await task_store.finish(val_task_id, val_result, [])
+                    summary += " ✓ validated" if is_valid else (
+                        f" (see validator task #{val_task_id} for issues)"
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("Methodology validation failed")
+                    await task_store.fail(
+                        val_task_id, "Validator encountered an error", []
+                    )
+            else:
+                try:
+                    is_valid, _ = await validate_methodology(
+                        model, mcp_tools, task, methodology_text, memory=memory,
+                    )
+                    summary += " ✓ validated" if is_valid else " (validation: issues remain)"
+                except Exception:  # noqa: BLE001
+                    logger.exception("Methodology validation failed")
+
         if memory is not None:
             from ..memory.lessons import schedule_reflection
             schedule_reflection(
