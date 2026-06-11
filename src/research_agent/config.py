@@ -262,6 +262,12 @@ class Settings(BaseSettings):
     # Max subagent tasks the background dispatcher runs concurrently.
     max_parallel_tasks: int = 4
 
+    # --- Artifact / task piping ---
+    # Total character budget for content injected into a task via input_artifacts
+    # and input_tasks.  Content that would exceed this is truncated with an explicit
+    # marker so the receiving subagent always sees a clearly-bounded context.
+    dispatch_input_budget_chars: int = 30_000
+
     # Name the agent answers to / signs off as.
     agent_name: str = "Beaker"
 

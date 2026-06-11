@@ -257,6 +257,7 @@ class ResearchBot(discord.Client):
         # task store to track them).
         if self.tasks is not None:
             from ..agents.dispatcher import TaskDispatcher, build_runners
+            from ..agents.pipeline import PipelineStore
             from ..writing import build_writers
             from ..llm import get_llm_for_role
 
@@ -267,9 +268,13 @@ class ResearchBot(discord.Client):
                 consortium=self.consortium, projects=self.projects, memory=self.memory,
                 task_store=self.tasks, model_for_role=get_llm_for_role,
             )
+            # Pipeline store shares the DB pool; gracefully disabled when pool is None.
+            pipeline_store = PipelineStore(self._pool)
+            await pipeline_store.setup()
             self.dispatcher = TaskDispatcher(
                 runners, self.tasks, self._on_task_complete,
                 settings.max_parallel_tasks,
+                pipelines=pipeline_store,
             )
 
         self.graph = await build_graph(
