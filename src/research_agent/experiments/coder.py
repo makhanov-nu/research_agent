@@ -164,7 +164,7 @@ class ExperimentCoder:
         return fixed
 
 
-def build_default_coder() -> "ExperimentCoder | None":
+def build_default_coder() -> ExperimentCoder | None:
     """Construct an ExperimentCoder from settings, or return None if unconfigured.
 
     Factored here so both agents/registry.py and ExperimentRunner can share the

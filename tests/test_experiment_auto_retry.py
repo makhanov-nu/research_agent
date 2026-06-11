@@ -157,9 +157,9 @@ async def test_auto_retry_on_failure_triggers_revise_and_relaunch(tmp_path, monk
     assert len(coder.revise_calls) == 1
     assert "ImportError" in coder.revise_calls[0]["logs"]
 
-    # The backend submitted a second container.
-    assert len(be.submitted) == 1  # first submit was manual; retry is the 2nd submit call
-    # Actually there is only 1 submit (the retry); the "first run" was injected via handle.
+    # The backend submitted exactly one container (the retry): the original
+    # run's handle was injected directly into the config, not via submit().
+    assert len(be.submitted) == 1
     assert be._submit_count == 1
 
     # Counter incremented in config JSONB.

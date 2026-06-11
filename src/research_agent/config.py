@@ -260,7 +260,7 @@ class Settings(BaseSettings):
     # and relaunch up to this many times without re-approval.  Retries reuse
     # the exact same JobSpec / resources, so the original human approval covers
     # them.  0 disables the feature entirely.
-    experiment_auto_retry: int = 2
+    experiment_auto_retry: int = Field(2, ge=0)
 
     # Require a human approval in Discord before launching a run.
     experiment_require_approval: bool = True

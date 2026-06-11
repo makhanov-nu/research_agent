@@ -13,6 +13,7 @@ import shlex
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..config import settings
 from .types import (
@@ -23,6 +24,9 @@ from .types import (
     JobStatus,
     Resources,
 )
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .coder import ExperimentCoder
 
 logger = logging.getLogger(__name__)
 
@@ -449,7 +453,7 @@ class ExperimentRunner:
         elapsed_min = (datetime.now(timezone.utc) - started_dt).total_seconds() / 60
         return limit if elapsed_min > limit else None
 
-    def _get_coder(self):
+    def _get_coder(self) -> "ExperimentCoder | None":
         """Return the configured coder, or try to build one from settings."""
         if self._coder is not None:
             return self._coder
@@ -526,7 +530,7 @@ class ExperimentRunner:
                 try:
                     current_files[rel] = (ws_root / rel).read_text(errors="replace")
                 except Exception:  # noqa: BLE001
-                    pass
+                    logger.debug("Auto-retry: could not read %s for exp %s", rel, exp_id)
 
             # 4. Ask the coder to produce a patched file set.
             spec_str = (cfg.get("plan") or exp.get("title") or f"experiment #{exp_id}")
@@ -535,11 +539,8 @@ class ExperimentRunner:
             # 5. Write the patched files into the workspace.
             await self.write_code(exp_id, fixed_files)
 
-            # 6. Increment counter and relaunch with the SAME JobSpec (immutability
-            #    guaranteed: we rebuild the spec from cfg which has not changed).
-            cfg["auto_retry_count"] = attempt
-            await self.episodic.update_experiment(exp_id, config=cfg, status="running")
-
+            # 6. Relaunch with the SAME JobSpec (immutability guaranteed: we
+            #    rebuild the spec from cfg keys the retry path never writes).
             res = cfg.get("resources", {})
             spec = JobSpec(
                 experiment_id=exp_id,
@@ -556,6 +557,9 @@ class ExperimentRunner:
             workspace_local = str(self.workspace.path_for(exp_id))
             new_handle = await self.backend.submit(spec, workspace_local)
 
+            # Single config write after the submit succeeds, so the counter and
+            # the new handle can never get out of sync in the registry.
+            cfg["auto_retry_count"] = attempt
             cfg["handle"] = new_handle.to_dict()
             cfg["started_at"] = datetime.now(timezone.utc).isoformat()
             await self.episodic.update_experiment(exp_id, config=cfg, status="running")
