@@ -26,16 +26,19 @@ class Settings(BaseSettings):
     discord_token: str = ""
 
     # --- LLM ---
-    # Provider: "openrouter" (default), "anthropic", or "openai".
+    # Provider: "openrouter" (default), "deepinfra", "anthropic", or "openai".
     llm_provider: str = "openrouter"
-    # Model id in the provider's namespace. OpenRouter uses slugs like
-    # "anthropic/claude-sonnet-4.6"; Anthropic uses "claude-sonnet-4-6".
-    llm_model: str = "anthropic/claude-sonnet-4.6"
+    # Model id in the provider's namespace. OpenRouter/DeepInfra use slugs like
+    # "deepseek/deepseek-v4-pro"; Anthropic uses "claude-sonnet-4-6".
+    llm_model: str = "deepseek/deepseek-v4-pro"
     llm_temperature: float = 0.2
     llm_max_tokens: int = 4096
     # OpenRouter (OpenAI-compatible) credentials.
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # DeepInfra (OpenAI-compatible) credentials.
+    deepinfra_api_key: str = ""
+    deepinfra_base_url: str = "https://api.deepinfra.com/v1/openai"
 
     # --- MCP servers (tools) ---
     paperclip_api_key: str = ""
@@ -81,7 +84,7 @@ class Settings(BaseSettings):
     # Cheap model that distills a finished job into reusable lessons. Used only
     # when OPENROUTER_API_KEY is set (build_reflection_llm); otherwise the default
     # agent model is used. Runs once per job in the background, so keep it small.
-    reflection_model: str = "anthropic/claude-haiku-4.5"
+    reflection_model: str = "qwen/qwen3.7-plus"
     # Max lessons to extract per job.
     reflection_max_lessons: int = Field(3, ge=1)
 
@@ -196,7 +199,7 @@ class Settings(BaseSettings):
         "qwen/qwen3.7-plus,moonshotai/kimi-k2.6"
     )
     # The chair: builds the brief, ranks the scores, leads the polish debate.
-    consortium_chair_model: str = "anthropic/claude-opus-4.8"
+    consortium_chair_model: str = "deepseek/deepseek-r1"
     consortium_temperature: float = 0.6
     # Turns in the shared debate track (turn 1 opens, the rest react).
     consortium_debate_turns: int = 2

@@ -47,9 +47,8 @@ def _embedder_block() -> dict:
 def _llm_block() -> dict:
     """mem0 LLM config mirroring the agent's provider.
 
-    OpenRouter is OpenAI-compatible, so it uses mem0's `openai` provider with a
-    custom base URL. The embedder stays on real OpenAI (OpenRouter has no
-    embeddings endpoint).
+    OpenRouter and DeepInfra are OpenAI-compatible; mem0's `openai` provider
+    with a custom base URL handles both.
     """
     provider = settings.llm_provider.lower()
     base = {"model": settings.llm_model, "temperature": 0.1, "max_tokens": 2000}
@@ -61,6 +60,15 @@ def _llm_block() -> dict:
                 **base,
                 "api_key": settings.openrouter_api_key,
                 "openai_base_url": settings.openrouter_base_url,
+            },
+        }
+    if provider == "deepinfra":
+        return {
+            "provider": "openai",
+            "config": {
+                **base,
+                "api_key": settings.deepinfra_api_key,
+                "openai_base_url": settings.deepinfra_base_url,
             },
         }
     if provider == "openai":
@@ -94,6 +102,7 @@ def _has_embedder_credentials() -> bool:
     """True when we have a key for the embeddings endpoint in use."""
     if settings.llm_provider.lower() == "openrouter":
         return bool(settings.openrouter_api_key)
+    # DeepInfra doesn't serve text-embedding-3-small; embeddings stay on OpenAI.
     return bool(settings.openai_api_key or _openai_key_in_env())
 
 
@@ -133,8 +142,8 @@ class SemanticMemory:
         if extra:
             metadata.update(extra)
         messages = [
-            {"role": "user", "content": user_text},
-            {"role": "assistant", "content": agent_text},
+            {"role": "user", "content": user_text.replace("\x00", "")},
+            {"role": "assistant", "content": agent_text.replace("\x00", "")},
         ]
         try:
             self._mem.add(messages, user_id=settings.memory_user_id, metadata=metadata)
@@ -170,6 +179,7 @@ class SemanticMemory:
         match (e.g. type="lesson", kind="literature"); filtered client-side so it
         works across mem0 versions. When filtering, we over-fetch then trim.
         """
+        query = query.replace("\x00", "")
         if not self.enabled:
             return ""
         scoped = only_type or only_kind

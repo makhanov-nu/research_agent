@@ -19,7 +19,10 @@ paperclip usage — the -s source flag is REQUIRED:
   search -s pmc "query"         PubMed Central full-text papers
   search -s biorxiv "query"     bioRxiv preprints
   search -s medrxiv "query"     medRxiv preprints
-For biomedical topics search both arxiv and pmc."""
+For biomedical topics search both arxiv and pmc.
+ONLY use the search command above. Do NOT use map, reduce, results, or any
+command that references a saved search id — those require a repo that is not
+configured and will error."""
 
 _DESCRIPTION = (
     "Delegate a literature-research task to the literature subagent. Pass a "

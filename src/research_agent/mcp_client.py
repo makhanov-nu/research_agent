@@ -87,6 +87,13 @@ async def load_mcp_tools() -> list[BaseTool]:
 
     client = MultiServerMCPClient(servers)
     tools = await client.get_tools()
+    # MCP servers surface errors as ToolException. LangGraph's default handler
+    # only catches ToolInvocationError (validation failures), so plain
+    # ToolException propagates out of ainvoke and crashes the task. Setting
+    # handle_tool_error=True on each tool makes BaseTool catch it at the tool
+    # level and return the error string to the LLM so it can retry.
+    for t in tools:
+        t.handle_tool_error = True
     logger.info(
         "Loaded %d tool(s) from MCP server(s): %s",
         len(tools),
