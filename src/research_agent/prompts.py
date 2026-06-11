@@ -32,9 +32,14 @@ Subagents (each handles a specific kind of work):
     saved to disk. Researcher fetches with `!getfile`.
   - design_methodology(idea, ...): designs a rigorous methodology (research
     questions, approach, baselines, metrics, protocol) and writes it as a LaTeX
-    \\section{{Methodology}} + BibTeX saved to disk. A validator agent runs
-    automatically after; if issues are found the writer revises once before
-    returning the final file.
+    \\section{{Methodology}} + BibTeX saved to disk. Use this to CREATE a new
+    methodology; do NOT use it to validate or review an existing one.
+  - review_methodology(path, original_task): validates an EXISTING methodology
+    file against the original task. Use when the researcher asks to check,
+    critique, or validate a methodology that was already written. First use
+    read_project_artifact to find the file path, then call this tool.
+    Returns VALID or a specific bullet list of issues. NEVER send this work to
+    design_methodology — that re-generates from scratch instead of reviewing.
   - draft_paper(brief, material, ...): drafts a paper or sections in LaTeX from
     material you supply. Pass prior outputs in `material`; inserts TODOs rather
     than fabricating results.

@@ -18,6 +18,48 @@ from .consortium_tool import build_consortium_tool
 from .literature import build_literature_agent_tool
 
 
+def _build_review_methodology_tool(llm, mcp_tools, output_dir: str, memory=None) -> BaseTool:
+    """Validate an existing methodology file without regenerating it."""
+    base = Path(output_dir).resolve()
+
+    @tool("review_methodology",
+          description=(
+              "Run the methodology validator on an EXISTING methodology file. "
+              "Use this when the researcher wants to check or critique a methodology "
+              "that has already been written — do NOT call design_methodology for this. "
+              "Provide the file path (relative to the output dir, e.g. "
+              "'projects/my-project/methodology/design.tex') AND the original research "
+              "task/idea the methodology was designed for. Returns VALID or a specific "
+              "bullet list of issues."
+          ))
+    async def review_methodology(path: str, original_task: str) -> str:
+        try:
+            target = (base / path).resolve()
+            target.relative_to(base)
+        except (ValueError, Exception):
+            return f"[review_methodology] Path rejected (must be inside {output_dir}): {path}"
+        if not target.exists():
+            return f"[review_methodology] File not found: {path}"
+        try:
+            methodology_text = target.read_text(errors="replace")
+        except Exception as exc:
+            return f"[review_methodology] Could not read {path}: {exc}"
+
+        from .methodology_validator import validate_methodology
+        try:
+            is_valid, feedback = await validate_methodology(
+                llm, mcp_tools, original_task, methodology_text, memory=memory
+            )
+        except Exception as exc:
+            return f"[review_methodology] Validator error: {exc}"
+
+        if is_valid:
+            return "VALID — the methodology is sound and addresses the original task."
+        return f"INVALID — the validator found issues:\n{feedback}"
+
+    return review_methodology
+
+
 def _build_read_artifact_tool(output_dir: str) -> BaseTool:
     base = Path(output_dir).resolve()
 
@@ -68,6 +110,11 @@ def build_delegated_tools(
         # Code reader subagent: fetches and analyses GitHub repositories.
         tools.append(
             build_code_reader_tool(llm, mcp_tools, task_store, memory, projects)
+        )
+        # Standalone methodology reviewer — validates an existing file without
+        # regenerating it. Distinct from design_methodology which writes from scratch.
+        tools.append(
+            _build_review_methodology_tool(llm, mcp_tools, output_dir, memory=memory)
         )
 
     # LaTeX writers: literature review, methodology, paper draft (each a subagent).
