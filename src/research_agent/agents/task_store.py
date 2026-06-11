@@ -81,7 +81,10 @@ def derive_auto_label(trace: list) -> tuple[str | None, dict]:
         verdict = entry.get("verdict") or "error"
         if verdict == "error":
             continue  # errors don't contribute a signal
-        rnd = int(entry.get("round") or 0)
+        try:
+            rnd = int(entry.get("round") or 0)
+        except (TypeError, ValueError):
+            rnd = 0  # malformed round: keep the signal, treat as neutral
         prev = _best.get(verifier)
         if prev is None or rnd >= prev[0]:
             _best[verifier] = (rnd, verdict)

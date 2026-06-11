@@ -502,7 +502,7 @@ async def test_judge_one_valid_response():
     assert result == (4, "Good output.")
 
 
-async def test_judge_one_parse_failure_returns_none(caplog):
+async def test_judge_one_parse_failure_returns_none():
     from research_agent.evals.judge import _judge_one
 
     llm = _MockLLM(["not valid json at all"])
