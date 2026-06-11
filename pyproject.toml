@@ -61,6 +61,8 @@ train = [
 research-agent = "research_agent.main:main"
 research-agent-web = "research_agent.web.main:main"
 research-agent-export = "research_agent.training.export:main"
+research-agent-judge = "research_agent.evals.judge:main"
+research-agent-eval = "research_agent.evals.harness:main"
 
 [build-system]
 requires = ["setuptools>=68"]
