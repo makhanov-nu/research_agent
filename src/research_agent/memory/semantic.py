@@ -136,9 +136,20 @@ class SemanticMemory:
             )
             return
         try:
+            import os
             from mem0 import Memory
 
-            self._mem = Memory.from_config(_build_config())
+            # mem0's OpenAILLM hard-checks OPENROUTER_API_KEY in os.environ at
+            # instantiation and routes ALL LLM calls through OpenRouter when it's
+            # present — ignoring our configured base_url/api_key. Hide it briefly
+            # so mem0 uses the provider-specific endpoint we configured above.
+            _saved_or_key = os.environ.pop("OPENROUTER_API_KEY", None)
+            try:
+                self._mem = Memory.from_config(_build_config())
+            finally:
+                if _saved_or_key is not None:
+                    os.environ["OPENROUTER_API_KEY"] = _saved_or_key
+
             logger.info("Semantic memory (mem0/pgvector) ready.")
         except Exception:  # noqa: BLE001
             logger.exception("Failed to initialize mem0; semantic memory off.")
