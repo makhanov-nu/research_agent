@@ -163,8 +163,12 @@ class ResearchBot(discord.Client):
         self._channel_locks = PerKeyLocks()
         # Sticky engagement: channel_id -> set of author ids the bot is following
         # there (so it answers without a fresh @-mention each turn). In-process,
-        # so a restart resets it; the user re-engages with one mention/reply.
+        # so a restart resets it; restored from checkpoints in setup_hook.
         self._engaged: dict[str, set[int]] = {}
+        # Threads the bot has ever participated in (restored from DB on startup).
+        # Used so the bot responds to messages in existing threads without
+        # needing a fresh @-mention after a restart.
+        self._known_threads: set[str] = set()
         # Channels we've already created a project for this process (cache so we
         # don't re-hit the DB on every message).
         self._ensured_projects: set[str] = set()
@@ -172,10 +176,28 @@ class ResearchBot(discord.Client):
         # discord.Message uses __slots__ so we can't set attributes on it directly.
         self._msg_dest: dict[int, discord.abc.Messageable] = {}
 
+    async def _restore_known_threads(self) -> None:
+        """Populate _known_threads from the checkpoints table on startup.
+
+        After a restart _engaged is empty, so the bot would ignore messages in
+        threads it previously participated in. Reading the checkpoint thread IDs
+        once at startup lets it resume without requiring a fresh @-mention.
+        """
+        if self._pool is None:
+            return
+        try:
+            async with self._pool.connection() as conn:
+                rows = await conn.execute("SELECT DISTINCT thread_id FROM checkpoints")
+                self._known_threads.update(r["thread_id"] for r in await rows.fetchall())
+            logger.info("Restored %d known thread(s) from checkpoints.", len(self._known_threads))
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not restore known threads from checkpoints.")
+
     async def setup_hook(self) -> None:
         self.llm = get_llm()
         self._pool = await open_pool()
         checkpointer = await build_checkpointer(self._pool)
+        await self._restore_known_threads()
 
         if settings.memory_enabled and self._pool is not None:
             self.memory = MemoryManager(self._pool)
@@ -388,10 +410,11 @@ class ResearchBot(discord.Client):
 
         author_id = message.author.id
         check_id = str(message.channel.id)
-        engaged = author_id in self._engaged.get(check_id, set())
+        engaged = (author_id in self._engaged.get(check_id, set())
+                   or check_id in self._known_threads)
 
         # Answer when addressed, or when already engaged in this channel (sticky,
-        # scoped to this author). Otherwise stay out of the conversation.
+        # scoped to this author, or restored from checkpoints after a restart).
         if not (addressed or engaged):
             return
 
@@ -409,6 +432,7 @@ class ResearchBot(discord.Client):
         # Being addressed (re)engages this author in this thread until !mute.
         if addressed and not is_dm:
             self._engaged.setdefault(thread_id, set()).add(author_id)
+            self._known_threads.add(thread_id)
 
         # Ensure the channel's project exists (threads share the parent channel's project).
         await self._ensure_project(message)
