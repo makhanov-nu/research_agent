@@ -31,9 +31,14 @@ def _make_resilient(tool: BaseTool) -> None:
     ToolInvocationError. httpx.HTTPStatusError (e.g. 504 from paperclip) is
     neither, so it propagates out of the ToolNode and crashes the whole task.
     We intercept it in ainvoke before LangGraph ever sees it.
+
+    BaseTool (StructuredTool) is a Pydantic model, so ordinary setattr is
+    blocked for non-field names. object.__setattr__ bypasses the validator and
+    puts the wrapper directly in the instance __dict__, which Python's attribute
+    lookup finds before the class method (non-data descriptor).
     """
     tool.handle_tool_error = True
-    orig_ainvoke = tool.ainvoke
+    orig_ainvoke = tool.ainvoke  # bound method on the instance
 
     async def _safe_ainvoke(inp, config=None, **kwargs):
         try:
@@ -44,7 +49,8 @@ def _make_resilient(tool: BaseTool) -> None:
             logger.warning("MCP tool %s HTTP %s error", tool.name, status)
             return msg
 
-    tool.ainvoke = _safe_ainvoke
+    # Bypass Pydantic's __setattr__ which rejects non-field names.
+    object.__setattr__(tool, "ainvoke", _safe_ainvoke)
 
 
 def _expand_env(obj):
