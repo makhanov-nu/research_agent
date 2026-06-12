@@ -201,6 +201,16 @@ class TaskStore:
                 (error, json.dumps(trace), task_id),
             )
 
+    async def cancel(self, task_id: int | None) -> None:
+        if not self.enabled or task_id is None:
+            return
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status='cancelled', error='Cancelled', finished_at=now() "
+                "WHERE id=%s AND status IN ('pending', 'running')",
+                (task_id,),
+            )
+
     async def get(self, task_id: int) -> Optional[dict]:
         if not self.enabled:
             return None

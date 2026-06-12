@@ -754,6 +754,20 @@ class TaskDispatcher:
         except Exception:  # noqa: BLE001
             logger.exception("Task completion handler failed for #%s", task_id)
 
+    async def cancel(self, task_id: int) -> bool:
+        """Cancel a running or pending task.
+
+        Marks the DB row cancelled and cancels the backing asyncio task when
+        it is still in flight. Returns True if the asyncio task was found and
+        cancelled, False if the task had already finished or was never running.
+        """
+        await self.task_store.cancel(task_id)
+        bg = self._running.pop(task_id, None)
+        if bg is not None:
+            bg.cancel()
+            return True
+        return False
+
     async def join(self) -> None:
         """Await all in-flight tasks (used in tests / graceful shutdown)."""
         if self._running:
@@ -827,7 +841,28 @@ def build_dispatch_tools(dispatcher: TaskDispatcher) -> list[BaseTool]:
             f"Its result will be delivered to you automatically when it finishes."
         )
 
-    tools: list[BaseTool] = [dispatch_task]
+    @tool(
+        "cancel_task",
+        description=(
+            "Cancel a running or pending background task by id. "
+            "Use when the user asks to stop a task or it is no longer needed. "
+            "Has no effect on tasks that are already done, failed, or cancelled."
+        ),
+    )
+    async def cancel_task(task_id: int) -> str:
+        row = await dispatcher.task_store.get(task_id)
+        if row is None:
+            return f"Task #{task_id} not found."
+        status = row.get("status", "")
+        if status not in ("pending", "running"):
+            return f"Task #{task_id} is already {status} — nothing to cancel."
+        found = await dispatcher.cancel(task_id)
+        agent = row.get("agent", "?")
+        if found:
+            return f"Task #{task_id} ({agent}) cancelled."
+        return f"Task #{task_id} ({agent}) marked cancelled (it may have just finished)."
+
+    tools: list[BaseTool] = [dispatch_task, cancel_task]
 
     # Pipeline tools — only when the dispatcher has a pipeline store.
     if dispatcher._pipelines is not None:

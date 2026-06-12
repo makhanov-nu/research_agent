@@ -57,6 +57,7 @@ HELP_TEXT = (
     "`!project` — show this chat's project + artifacts (`!project name <x>` to rename)\n"
     "`!tasks` — recent subagent tasks (the dashboard)\n"
     "`!task <id>` — a task's status + result\n"
+    "`!canceltask <id>` — cancel a running or pending subagent task\n"
     "`!trace <id>` — export a task's full trace (reasoning + tool calls) as a file\n"
     "`!feedback <id> <good|bad> [note]` — rate a task; I bank it as a lesson and "
     "a training label\n"
@@ -812,7 +813,7 @@ class ResearchBot(discord.Client):
             await self._send_file(message, arg.strip())
         elif cmd == "ideate":
             await self._ideate(message, arg.strip(), config)
-        elif cmd in {"tasks", "task", "trace"}:
+        elif cmd in {"tasks", "task", "trace", "canceltask"}:
             await self._handle_task_command(message, cmd, arg.strip())
         elif cmd == "feedback":
             await self._handle_feedback(message, arg.strip())
@@ -882,6 +883,22 @@ class ResearchBot(discord.Client):
             )
             for chunk in _chunk(body):
                 await self._ch(message).send(chunk)
+            return
+
+        if cmd == "canceltask":
+            status = task.get("status", "")
+            if status not in ("pending", "running"):
+                await self._ch(message).send(
+                    f"Task #{task['id']} is already **{status}** — nothing to cancel."
+                )
+                return
+            if self.dispatcher is None:
+                await self._ch(message).send("Dispatcher isn't running — cannot cancel tasks.")
+                return
+            await self.dispatcher.cancel(task["id"])
+            await self._ch(message).send(
+                f"Task #{task['id']} ({task.get('agent', '?')}) cancelled."
+            )
             return
 
         # cmd == "trace": export the full trace as a JSON file via outputs/
