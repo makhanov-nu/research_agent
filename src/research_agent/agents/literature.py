@@ -14,6 +14,10 @@ and flag open gaps. Always cite sources with identifiers/links (arXiv id, DOI, \
 PMID, URL). Do not invent papers. Return ONLY the synthesis — the caller does not \
 see your intermediate searches, so make the answer stand on its own.
 
+HARD LIMIT: use at most 8 searches and 8 paper reads total. After reaching that \
+budget (or sooner, once you have enough to answer well), stop issuing tool calls \
+and write your final synthesis immediately. Do not loop or retry the same query.
+
 paperclip usage — the -s source flag is REQUIRED:
   search -s arxiv "query"       arXiv preprints
   search -s pmc "query"         PubMed Central full-text papers
@@ -31,6 +35,8 @@ _DESCRIPTION = (
     "answer. Use this for anything needing sources; do not recall papers yourself."
 )
 
+_RECURSION_LIMIT = 80
+
 
 def build_literature_agent_tool(
     model, lit_tools, task_store=None, memory=None, projects=None
@@ -45,6 +51,7 @@ def build_literature_agent_tool(
         memory=memory,
         agent_kind="literature",
         projects=projects,
+        recursion_limit=_RECURSION_LIMIT,
     )
 
 
@@ -55,6 +62,7 @@ def build_literature_runner(model, lit_tools, memory=None):
         return await run_subagent(
             system_prompt=_SYSTEM, tools=lit_tools, model=model, task=task,
             memory=memory, agent_kind="literature", channel_id=channel_id,
+            recursion_limit=_RECURSION_LIMIT,
         )
 
     return _run
