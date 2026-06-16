@@ -33,33 +33,41 @@ def test_parse_ideas_drops_preamble_before_first_marker():
     assert parse_ideas("My best:\n=== IDEA ===\nThe Idea", max_n=1) == ["The Idea"]
 
 
-def test_parse_ideas_fallback_and_error_sentinel():
-    assert parse_ideas("one idea, no marker") == ["one idea, no marker"]
+def test_parse_ideas_rejects_output_without_marker():
+    # Missing the contract marker is an output-contract violation now, not a
+    # fallback to "treat the whole blob as one idea" — it's rejected outright.
+    assert parse_ideas("one idea, no marker") == []
     assert parse_ideas("[deepseek/x could not respond: boom]") == []
     assert parse_ideas("") == []
 
 
 def test_parse_scores_prefers_json_filters_and_clamps():
-    # ids outside the pool are dropped; scores clamp to [0, 10].
-    assert parse_scores('{"1": 8, "2": 3, "9": 5}', {1, 2}) == {1: 8.0, 2: 3.0}
-    assert parse_scores('{"1": 99, "2": -4}', {1, 2}) == {1: 10.0, 2: 0.0}
+    # ids outside the pool are dropped; scores clamp to [0, 10]; no reason
+    # lines present here, so reasons default to "".
+    assert parse_scores('{"1": 8, "2": 3, "9": 5}', {1, 2}) == {1: (8.0, ""), 2: (3.0, "")}
+    assert parse_scores('{"1": 99, "2": -4}', {1, 2}) == {1: (10.0, ""), 2: (0.0, "")}
 
 
-def test_parse_scores_falls_back_to_lines():
-    assert parse_scores("#1: 7\n#2 - 4", {1, 2}) == {1: 7.0, 2: 4.0}
+def test_parse_scores_falls_back_to_lines_and_captures_reason():
+    assert parse_scores("#1: 7\n#2 - 4", {1, 2}) == {1: (7.0, "7"), 2: (4.0, "")}
+    text = '{"1": 8, "2": 3}\n#1: groundbreaking formalism\n#2: incremental'
+    parsed = parse_scores(text, {1, 2})
+    assert parsed == {1: (8.0, "groundbreaking formalism"), 2: (3.0, "incremental")}
 
 
 def test_normalize_and_rank_normalizes_across_raters():
     pool = [{"id": 1, "text": "a"}, {"id": 2, "text": "b"}, {"id": 3, "text": "c"}]
     scores = {
-        "lenient": {1: 9, 2: 8, 3: 10},  # everything high
-        "harsh": {1: 2, 2: 1, 3: 4},     # everything low
+        "lenient": {1: (9, "ok"), 2: (8, "ok"), 3: (10, "great")},  # everything high
+        "harsh": {1: (2, "weak"), 2: (1, "weak"), 3: (4, "least bad")},  # everything low
     }
     ranked = normalize_and_rank(pool, scores)
     # idea 3 is best for both raters -> rank 1; idea 2 worst -> last.
     assert [i["id"] for i in ranked] == [3, 1, 2]
     assert ranked[0]["score"] == 7.0  # raw mean of 10 and 4
     assert ranked[0]["n_scores"] == 2
+    assert {r["model"] for r in ranked[0]["raters"]} == {"lenient", "harsh"}
+    assert all(r["reason"] for r in ranked[0]["raters"])
 
 
 def test_idea_synopsis_and_document():
@@ -96,65 +104,35 @@ class _FakeConsortium(Consortium):
             {"text": f"{m} idea {k}", "source": "independent", "by": m}
             for m in self.panel for k in (1, 2, 3)
         ]
-        return ideas, []
+        threads = {m: [f"propose-thread-{m}"] for m in self.panel}
+        return ideas, threads, []
 
     async def debate_ideas(self, brief, prior=""):
-        ideas = [{"text": f"{m} debated", "source": "debated", "by": m} for m in self.panel]
+        # Chair-extracted: 2 ownerless ideas, not one per panelist.
+        ideas = [{"text": "debated synthesis A", "source": "debated", "by": "panel"},
+                 {"text": "debated synthesis B", "source": "debated", "by": "panel"}]
         return ideas, [("Brief", brief), ("m/a", "...")], []
 
-    async def score_pool(self, pool, instruction=None):
-        # Lower id -> higher score, so ranking is deterministic.
-        scores = {m: {i["id"]: max(0, 10 - i["id"]) for i in pool} for m in self.panel}
-        return scores, []
-
-    async def vote_pool(self, pool):
-        return await self.score_pool(pool)
-
-    async def polish_idea(self, idea_text, instructions, prior=""):
-        indep = [
-            {"text": f"{m} polished {idea_text[:6]}", "source": "independent", "by": m}
-            for m in self.panel
-        ]
-        debated = {"text": f"debated polish {idea_text[:6]}", "source": "debated", "by": "panel"}
-        return indep, debated, [("x", "y")], []
+    async def score_round1(self, pool, propose_threads):
+        # Lower id -> higher score, so ranking is deterministic. No self-exclusion
+        # in this stub — that bias-elimination behavior has its own real-code path.
+        scores = {m: {i["id"]: (max(0, 10 - i["id"]), f"reason for {i['id']}") for i in pool}
+                  for m in self.panel}
+        return scores, [], []
 
 
-async def test_round1_pools_16_ideas_and_returns_top5(tmp_path):
+async def test_round1_pools_14_ideas_no_cut(tmp_path):
     session = _FakeConsortium(tmp_path).new_session("topic")
     top = await session.run_round1()
 
-    assert len(session.pool) == 16                      # 12 independent + 4 debated
-    assert {i["id"] for i in session.pool} == set(range(1, 17))
+    assert len(session.pool) == 14                      # 12 independent + 2 debated
+    assert {i["id"] for i in session.pool} == set(range(1, 15))
     assert {i["source"] for i in session.pool} == {"independent", "debated"}
-    assert [i["id"] for i in top] == [1, 2, 3, 4, 5]    # lower id scored higher
+    assert len(top) == 14                                # no top-N cut
+    assert [i["id"] for i in top[:5]] == [1, 2, 3, 4, 5]  # lower id scored higher
     assert session.phase == "scored"
     assert all("score" in i for i in top)
-
-
-async def test_select_and_polish_votes_and_caps_to_5(tmp_path):
-    session = _FakeConsortium(tmp_path).new_session("topic")
-    await session.run_round1()
-    top = await session.select_and_polish(picks=[1, 2])
-
-    # 2 ideas × (4 independent + 1 debated) = 10 proposals -> capped to top 5.
-    assert len(session.pool) == 10
-    assert len(top) == 5
-    assert session.phase == "polished"
-    assert session.round_no == 2
-    assert [i["id"] for i in session.selected] == [1, 2]  # selection remembered
-
-
-async def test_again_reuses_selection(tmp_path):
-    session = _FakeConsortium(tmp_path).new_session("topic")
-    await session.run_round1()
-    await session.select_and_polish(picks=[3])
-    assert [i["id"] for i in session.selected] == [3]
-    # 1 idea -> 5 proposals (<=5) -> all returned.
-    assert len(session.top) == 5
-
-    await session.select_and_polish(picks=None, comments="go deeper on proofs")
-    assert [i["id"] for i in session.selected] == [3]     # unchanged
-    assert session.round_no == 3
+    assert all(i["raters"] for i in top)                 # per-rater score+reason kept
 
 
 async def test_finalize_saves_document_with_debate(tmp_path):
@@ -164,16 +142,22 @@ async def test_finalize_saves_document_with_debate(tmp_path):
 
     assert session.finalized and result["rounds"] == 1
     assert result["top"] == session.top
-    saved = next((tmp_path / "ideas").glob("*.md")).read_text()
+    main = next(p for p in (tmp_path / "ideas").glob("*.md") if not p.name.endswith("-references.md"))
+    saved = main.read_text()
     assert "# Research ideas — my topic" in saved
     assert "idea debate" in saved.lower()                 # debate transcript persisted
+    assert "Bibliography" in saved                        # per-idea bibliography section
+    refs_path = tmp_path / "ideas" / result["rel_references_path"].split("/", 1)[1]
+    assert refs_path.exists()
 
 
 async def test_ideate_runs_round1_only_non_interactive(tmp_path):
     result = await _FakeConsortium(tmp_path).ideate("topic")
     assert result["rounds"] == 1
-    assert len(result["top"]) == 5
+    assert len(result["top"]) == 14                       # no top-N cut
     assert result["rel_path"].startswith("ideas/")
+    assert result["rel_references_path"].startswith("ideas/")
+    assert result["rel_references_path"].endswith("-references.md")
 
 
 # --- memory capture ----------------------------------------------------------

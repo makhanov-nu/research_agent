@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     # Keep this many most-recent messages verbatim when summarizing.
     summary_keep_last: int = 6
     # Auto-summarize older turns once live context exceeds this many tokens.
-    summary_token_threshold: int = 24000
+    summary_token_threshold: int = 256000
     # Surface a "want to checkpoint?" nudge each time context crosses a multiple
     # of this many tokens.
     nudge_every_tokens: int = 20000
@@ -222,8 +222,9 @@ class Settings(BaseSettings):
     # The chair: builds the brief, ranks the scores, leads the polish debate.
     consortium_chair_model: str = "deepseek/deepseek-r1"
     consortium_temperature: float = 0.6
-    # Turns in the shared debate track (turn 1 opens, the rest react).
-    consortium_debate_turns: int = 2
+    # Turns in the shared debate track (turn 1 opens, the rest react). Kept at 1:
+    # debate is now a single opening pass, chair-extracted, to bound cost.
+    consortium_debate_turns: int = 1
     # Back-compat (unused by the two-track flow).
     consortium_rounds: int = 1
 
