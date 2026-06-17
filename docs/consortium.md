@@ -32,7 +32,7 @@ flowchart TD
         D --> DEXTRACT["Chair extracts exactly 2 ideas\nfrom the transcript — ownerless,\nauthor: 'debated (panel)'"]
     end
 
-    PC --> POOL["Idea pool: up to 4 independent + 2 debated"]
+    PC --> POOL["Idea pool: up to (3 × panel_size) independent + 2 debated"]
     DEXTRACT --> POOL
 
     POOL --> SCORE
@@ -69,8 +69,8 @@ flowchart TD
 ## Discord usage
 
 `!ideate <topic>` runs the round and posts the result directly — there's no
-`pick`/`again`/`done` follow-up. While a run is in flight in a channel,
-another `!ideate` in that same channel is rejected ("the panel is still
+`pick`/`again`/`done` follow-up. While a run is in flight in a thread/conversation,
+another `!ideate` in that same thread is rejected ("the panel is still
 deliberating") rather than queued.
 
 ## Configuration

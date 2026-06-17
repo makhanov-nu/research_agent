@@ -999,25 +999,35 @@ class ResearchBot(discord.Client):
         finally:
             self.consortium_sessions.pop(thread_id, None)
 
-        # Save the proposals into the project's council folder.
+        # Save side effects best-effort; don't drop a finished, paid-for round
+        # over a non-critical persistence failure.
         council_rel = ""
+        side_effect_warnings: list[str] = []
         project_key = self._project_channel_id(self._ch(message))
         if self.projects is not None:
             from ..projects import save_council_proposal
 
-            project = await self.projects.ensure(project_key)
-            council_rel = await save_council_proposal(
-                self.projects, project, session.topic, result["ideas"]
-            )
+            try:
+                project = await self.projects.ensure(project_key)
+                council_rel = await save_council_proposal(
+                    self.projects, project, session.topic, result["ideas"]
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to save council proposal artifact")
+                side_effect_warnings.append("⚠️ Couldn't save the council proposal artifact.")
 
         # Capture the session (incl. the debate) to memory so future ideation's
         # debate track recalls it (scoped to the project, not the individual thread).
         from ..consortium import capture_council
 
-        await capture_council(
-            self.memory, project_key, session.topic,
-            result["ideas"], result["rel_path"], rounds=result["rounds"],
-        )
+        try:
+            await capture_council(
+                self.memory, project_key, session.topic,
+                result["ideas"], result["rel_path"], rounds=result["rounds"],
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to capture council session")
+            side_effect_warnings.append("⚠️ Couldn't capture this session to council memory.")
 
         for chunk in _chunk(result["ideas"]):
             await self._ch(message).send(chunk)
@@ -1027,6 +1037,8 @@ class ResearchBot(discord.Client):
         )
         if council_rel:
             tail += f"Saved for methodology: `!getfile {council_rel}`\n"
+        if side_effect_warnings:
+            tail += "\n".join(side_effect_warnings) + "\n"
         tail += "Want me to hand a chosen idea to the methodology writer? Just say the word."
         await self._ch(message).send(tail)
 
