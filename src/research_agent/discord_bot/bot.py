@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 
 import discord
 
@@ -51,9 +50,8 @@ HELP_TEXT = (
     "`!cancel <id>` — cancel a running experiment\n"
     "`!getfile <path>` — fetch a written output (e.g. a drafted LaTeX review)\n"
     "`!ideate <topic>` — convene the consortium: independent + debated proposals, "
-    "scored 0–10, top 5 returned. Reply with numbers (e.g. `2,4`) to develop them, "
-    "`!ideate again <notes>` for another polish+vote round, `!ideate done` to "
-    "finalize, `!ideate cancel` to drop\n"
+    "scored 0–10 with author + reviewer reasons, one round, every surviving idea "
+    "returned with a bibliography (no picking/polish round)\n"
     "`!project` — show this chat's project + artifacts (`!project name <x>` to rename)\n"
     "`!tasks` — recent subagent tasks (the dashboard)\n"
     "`!task <id>` — a task's status + result\n"
@@ -99,11 +97,6 @@ def _flatten(content) -> str:
             b.get("text", "") if isinstance(b, dict) else str(b) for b in content
         )
     return content if isinstance(content, str) else str(content)
-
-
-def _parse_picks(text: str) -> list[int]:
-    """Extract idea numbers from a researcher's reply (e.g. '2,4' or 'do 1 and 3')."""
-    return [int(n) for n in re.findall(r"\d+", text or "")]
 
 
 class PerKeyLocks:
@@ -152,7 +145,7 @@ class ResearchBot(discord.Client):
         self.memory: MemoryManager | None = None
         self.experiments = None
         self.consortium = None
-        self.consortium_sessions: dict = {}  # channel_id -> ConsortiumSession
+        self.consortium_sessions: dict = {}  # channel_id -> ConsortiumSession (in-flight only)
         self.projects = None
         self.tasks = None
         self.dispatcher = None
@@ -474,19 +467,6 @@ class ResearchBot(discord.Client):
 
         if not content and not attach_text:
             await self._ch(message).send(attach_notes or "Hi — what are we researching?")
-            return
-
-        # A plain reply of idea numbers picks consortium ideas while a session is
-        # awaiting the choice (now works mention-free because we're engaged).
-        session = self.consortium_sessions.get(thread_id)
-        if session is not None and not session.finalized and session.phase == "scored":
-            picks = _parse_picks(content)
-            if picks:
-                await self._consortium_polish(message, session, picks=picks)
-            else:
-                await self._ch(message).send(
-                    "Reply with the idea numbers to develop (e.g. `2,4`), or `!ideate done`."
-                )
             return
 
         if attach_notes:  # surface unreadable-file warnings alongside the answer
@@ -967,12 +947,10 @@ class ResearchBot(discord.Client):
             await self._ch(message).send(f"Couldn't update task #{task_id}.")
 
     async def _ideate(self, message, arg, config) -> None:
-        """Drive the consortium.
-
-        `!ideate <topic>` runs round 1 (independent + debated proposals, then
-        scoring) and posts the top 5; reply with numbers (or `!ideate pick 2,4`) to
-        develop them; `!ideate again <notes>` runs another polish+vote round;
-        `!ideate done` finalizes; `!ideate cancel` drops the session.
+        """Convene the consortium for one round: independent + debated proposals,
+        then scoring. Every idea that survives the output contract is returned,
+        ranked, with author, reviewer reasons, and a bibliography — there's no
+        picking/polish round to drive afterward.
         """
         if self.consortium is None:
             await self._ch(message).send(
@@ -981,156 +959,86 @@ class ResearchBot(discord.Client):
             return
 
         thread_id = config["configurable"]["thread_id"]
-        session = self.consortium_sessions.get(thread_id)
-        sub, _, rest = arg.strip().partition(" ")
-        sub, rest = sub.lower(), rest.strip()
-
-        if sub in {"done", "finish", "finalize"}:
-            if session is not None:
-                await self._finalize_consortium(message, session, config)
-            else:
-                await self._ch(message).send("No active session. Start one with `!ideate <topic>`.")
-            return
-        if sub in {"cancel", "stop", "abort"}:
-            if session is not None:
-                self.consortium_sessions.pop(thread_id, None)
-                await self._ch(message).send("Consortium session cancelled.")
-            else:
-                await self._ch(message).send("No active consortium session to cancel.")
-            return
-        if sub in {"again", "refine", "another"}:
-            if session is not None and session.phase == "polished":
-                await self._consortium_polish(message, session, picks=None, comments=rest)
-            else:
-                await self._ch(message).send("Nothing to refine yet — pick ideas from a round-1 top-5 first.")
-            return
-        if sub == "pick":
-            picks = _parse_picks(rest)
-            if session is not None and session.phase == "scored" and picks:
-                await self._consortium_polish(message, session, picks=picks)
-            else:
-                await self._ch(message).send("`!ideate pick <numbers>` works on a round-1 top-5.")
-            return
-
-        # An active session: route by phase.
-        if session is not None and not session.finalized:
-            picks = _parse_picks(arg)
-            if session.phase == "scored" and picks:
-                await self._consortium_polish(message, session, picks=picks)
-            else:
-                await self._ch(message).send(self._ideate_hint(session))
-            return
-
-        # No active session: start a fresh one on the given topic.
-        if not arg.strip():
-            await self._ch(message).send("Usage: `!ideate <topic>`")
-            return
-        session = self.consortium.new_session(arg.strip())
-        self.consortium_sessions[thread_id] = session
-        await self._ch(message).send(
-            f"Convening the consortium on **{arg.strip()}**.\n"
-            f"Panel: {', '.join(self.consortium.panel)} · chair: {self.consortium.chair_model}.\n"
-            "Round 1: each model proposes 3 ideas **independently**, a separate "
-            "**debate** track adds more, then everyone scores all of them. I'll post "
-            "the top 5. (A few minutes…)"
-        )
-        await self._consortium_round1(message, session)
-
-    @staticmethod
-    def _ideate_hint(session) -> str:
-        if session.phase == "scored":
-            return "Reply with idea numbers to develop (e.g. `2,4`), or `!ideate done`."
-        if session.phase == "polished":
-            return "Reply `!ideate again <notes>` for another round, or `!ideate done` to finalize."
-        return "The panel is working — one moment…"
-
-    async def _consortium_round1(self, message, session) -> None:
-        if session.busy:
+        if thread_id in self.consortium_sessions:
             await self._ch(message).send("The panel is still deliberating — one moment…")
             return
-        session.busy = True
+
+        topic = arg.strip()
+        if not topic:
+            await self._ch(message).send("Usage: `!ideate <topic>`")
+            return
+
+        session = self.consortium.new_session(topic)
+        self.consortium_sessions[thread_id] = session
+        await self._ch(message).send(
+            f"Convening the consortium on **{topic}**.\n"
+            f"Panel: {', '.join(self.consortium.panel)} · chair: {self.consortium.chair_model}.\n"
+            "Each model proposes 3 ideas independently, a debate track adds two "
+            "more, then everyone scores all of them. I'll post every surviving "
+            "idea, ranked, with author and reviewer reasons. (A few minutes…)"
+        )
+
         try:
             async with self._ch(message).typing():
                 await session.run_round1()
         except Exception:  # noqa: BLE001
-            logger.exception("Consortium round 1 failed")
+            logger.exception("Consortium round failed")
             await self._ch(message).send("The consortium hit an error this round. Check the logs.")
+            self.consortium_sessions.pop(thread_id, None)
             return
-        finally:
-            session.busy = False
 
-        for chunk in _chunk("**Round 1 — top 5 (scored 0–10)**\n\n" + session.render_top()):
-            await self._ch(message).send(chunk)
-        await self._ch(message).send(
-            "Reply with the numbers to develop (e.g. `2,4`), or `!ideate done` to finalize."
-        )
-
-    async def _consortium_polish(self, message, session, picks: list[int] | None, comments: str = "") -> None:
-        if session.busy:
-            await self._ch(message).send("The panel is still deliberating — one moment…")
-            return
-        session.busy = True
-        try:
-            async with self._ch(message).typing():
-                await session.select_and_polish(picks=picks, comments=comments)
-        except Exception:  # noqa: BLE001
-            logger.exception("Consortium polish round failed")
-            await self._ch(message).send("The panel hit an error polishing. Check the logs.")
-            return
-        finally:
-            session.busy = False
-
-        for chunk in _chunk(f"**Round {session.round_no} — polished & voted**\n\n" + session.render_top()):
-            await self._ch(message).send(chunk)
-        await self._ch(message).send(
-            "Reply `!ideate again <notes>` for another round, or `!ideate done` to finalize."
-        )
-
-    async def _finalize_consortium(self, message, session, config) -> None:
-        if session.busy:
-            await self._ch(message).send("The panel is still deliberating — one moment…")
-            return
-        session.busy = True
         try:
             async with self._ch(message).typing():
                 result = await session.finalize()
         except Exception:  # noqa: BLE001
             logger.exception("Consortium finalize failed")
-            await self._ch(message).send("The chair hit an error finalizing. Check the logs.")
-            session.busy = False
+            await self._ch(message).send(
+                "The panel scored the ideas but hit an error saving them. Check the logs."
+            )
             return
-        session.busy = False
-        thread_id = config["configurable"]["thread_id"]
-        self.consortium_sessions.pop(thread_id, None)
+        finally:
+            self.consortium_sessions.pop(thread_id, None)
 
-        # Save the chosen proposal(s) into the project's council folder.
+        # Save side effects best-effort; don't drop a finished, paid-for round
+        # over a non-critical persistence failure.
         council_rel = ""
+        side_effect_warnings: list[str] = []
         project_key = self._project_channel_id(self._ch(message))
         if self.projects is not None:
             from ..projects import save_council_proposal
 
-            project = await self.projects.ensure(project_key)
-            council_rel = await save_council_proposal(
-                self.projects, project, session.topic, result["ideas"]
-            )
+            try:
+                project = await self.projects.ensure(project_key)
+                council_rel = await save_council_proposal(
+                    self.projects, project, session.topic, result["ideas"]
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to save council proposal artifact")
+                side_effect_warnings.append("⚠️ Couldn't save the council proposal artifact.")
 
         # Capture the session (incl. the debate) to memory so future ideation's
         # debate track recalls it (scoped to the project, not the individual thread).
         from ..consortium import capture_council
 
-        await capture_council(
-            self.memory, project_key, session.topic,
-            result["ideas"], result["rel_path"], rounds=result["rounds"],
-        )
+        try:
+            await capture_council(
+                self.memory, project_key, session.topic,
+                result["ideas"], result["rel_path"], rounds=result["rounds"],
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to capture council session")
+            side_effect_warnings.append("⚠️ Couldn't capture this session to council memory.")
 
         for chunk in _chunk(result["ideas"]):
             await self._ch(message).send(chunk)
         tail = (
-            f"Done after {result['rounds']} round(s). "
             f"Full transcript (ideas + debates): `!getfile {result['rel_path']}`\n"
+            f"References: `!getfile {result['rel_references_path']}`\n"
         )
         if council_rel:
             tail += f"Saved for methodology: `!getfile {council_rel}`\n"
+        if side_effect_warnings:
+            tail += "\n".join(side_effect_warnings) + "\n"
         tail += "Want me to hand a chosen idea to the methodology writer? Just say the word."
         await self._ch(message).send(tail)
 

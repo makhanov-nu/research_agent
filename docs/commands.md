@@ -8,7 +8,7 @@ starting with `!` is treated as a message to the agent. Commands:
 | `!help` | Show the command list |
 | `!remember <text>` | Store a durable preference/instruction (procedural memory) |
 | `!checkpoint` (`!summarize`) | Summarize this thread to long-term memory and reset the live context |
-| `!ideate <topic>` | Convene the [multi-model consortium](consortium.md) to propose 3 Q1 ideas |
+| `!ideate <topic>` | Convene the [scored consortium](consortium.md): one round, every surviving idea ranked with author + bibliography |
 | `!tasks` | List recent subagent tasks (the dashboard) |
 | `!task <id>` | A task's status + result |
 | `!trace <id>` | Export a task's full trace (reasoning + tool calls) as a file |

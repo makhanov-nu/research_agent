@@ -1,21 +1,24 @@
 """The two-track ideation consortium.
 
 A panel of frontier reasoning models (via OpenRouter) generates ideas through two
-*isolated* tracks, then everything is scored and the strongest survive:
+*isolated* tracks in a SINGLE round, then everything is scored and ranked:
 
 - **Independent track** — each panelist works ALONE from the chair's brief and
   proposes 3 ideas (diversity: their errors stay decorrelated).
 - **Debated track** — the panelists hold a separate shared conversation, blind to
-  the independents, and each submits its single strongest debate-born idea
-  (emergent synthesis). The debate transcript is saved for future sessions.
+  the independents (capped at 1 turn); the chair extracts the 2 strongest,
+  genuinely distinct ideas that emerged (ownerless: "debated (panel)").
 
-The two pools merge (anonymized), every panelist scores all of them 0-10 under an
-anti-neutrality rubric, and the chair ranks them (normalizing across raters) into
-a top-5 for the researcher. The researcher picks; the panel then *polishes* the
-chosen idea(s) — again on both tracks — and votes; the best are returned.
+The two pools merge (independent ideas anonymized by self-exclusion — a model
+never sees its own idea on its own ballot), and every panelist scores them 0-10
+under a hard-calibration, expert-reviewer rubric by CONTINUING its own
+propose-phase thread (tool-free, never the debate thread, so a panelist that
+argued for a debated idea isn't scoring from a context already invested in it).
+Every idea that survives the output contract is returned, ranked — no top-N cut,
+no second polish/vote round.
 
-`Consortium.ideate(...)` runs round 1 only (propose + score) non-interactively for
-the orchestrator's `brainstorm_research_ideas` tool and the background dispatcher.
+`Consortium.ideate(...)` is this single round, run non-interactively for the
+orchestrator's `brainstorm_research_ideas` tool and the background dispatcher.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ logger = logging.getLogger(__name__)
 IDEA_MARKER = "=== IDEA ==="
 _IDEA_SPLIT = re.compile(re.escape(IDEA_MARKER), re.IGNORECASE)
 _SCORE_LINE = re.compile(r"#?\s*(\d+)\s*[:=\-]\s*(\d+(?:\.\d+)?)")
+_REASON_LINE = re.compile(r"^\s*#\s*(\d+)\s*:\s*(.+)$", re.MULTILINE)
 _JSON_OBJ = re.compile(r"\{[^{}]*\}", re.DOTALL)
 
 
@@ -45,32 +49,40 @@ def _flatten(content) -> str:
 
 # --- pure helpers (unit-tested) ----------------------------------------------
 
-def parse_ideas(text: str, max_n: int = 3) -> list[str]:
+def parse_ideas(text: str, max_n: int = 3, *, model: str = "") -> list[str]:
     """Split a panelist's output into idea blocks on the IDEA_MARKER.
 
     Any preamble before the first marker is dropped (models routinely prefix a
-    "Sure, here are my ideas:"), so it never masquerades as idea #1. Falls back to
-    the whole text as a single idea when the marker is absent; an error sentinel
-    (``[... could not respond ...]``) yields no ideas.
+    "Sure, here are my ideas:"), so it never masquerades as idea #1. Output
+    lacking the marker breaks the contract and is rejected outright (logged),
+    rather than silently entering the pool as a raw, unstructured blob.
     """
     text = (text or "").strip()
     if not text or (text.startswith("[") and "could not" in text[:80]):
         return []
-    if IDEA_MARKER.lower() in text.lower():
-        # split()[1:] discards the segment before the first marker (the preamble).
-        parts = [p.strip() for p in _IDEA_SPLIT.split(text)[1:] if p.strip()]
-    else:
-        parts = [text]
+    if IDEA_MARKER.lower() not in text.lower():
+        logger.warning(
+            "%s output missing %r marker; rejecting (output-contract violation)",
+            model or "panelist", IDEA_MARKER,
+        )
+        return []
+    # split()[1:] discards the segment before the first marker (the preamble).
+    parts = [p.strip() for p in _IDEA_SPLIT.split(text)[1:] if p.strip()]
     return parts[:max_n]
 
 
-def parse_scores(text: str, valid_ids: set[int]) -> dict[int, float]:
-    """Parse a scorer's output into {idea_id: score in 0..10}.
+def parse_scores(text: str, valid_ids: set[int]) -> dict[int, tuple[float, str]]:
+    """Parse a scorer's output into {idea_id: (score in 0..10, reason)}.
 
-    Prefers a JSON object ``{"1": 8, ...}``; falls back to ``#N: score`` lines.
-    Only ids in `valid_ids` are kept; scores are clamped to [0, 10].
+    Scores prefer a JSON object ``{"1": 8, ...}``, falling back to ``#N: score``
+    lines when no JSON parses. Reasons come from ``#N: <text>`` lines (the
+    one-/two-sentence justification the prompt asks for) and default to "" when
+    absent. Only ids in `valid_ids` are kept; scores are clamped to [0, 10]. An
+    empty return means a failed ballot — the caller should flag it, not treat it
+    as "the model scored nothing on purpose."
     """
-    out: dict[int, float] = {}
+    text = text or ""
+    scores: dict[int, float] = {}
 
     def _store(key, val) -> None:
         try:
@@ -78,9 +90,9 @@ def parse_scores(text: str, valid_ids: set[int]) -> dict[int, float]:
         except (TypeError, ValueError):
             return
         if i in valid_ids:
-            out[i] = max(0.0, min(10.0, s))
+            scores[i] = max(0.0, min(10.0, s))
 
-    for block in _JSON_OBJ.findall(text or ""):
+    for block in _JSON_OBJ.findall(text):
         try:
             obj = json.loads(block)
         except json.JSONDecodeError:
@@ -88,23 +100,40 @@ def parse_scores(text: str, valid_ids: set[int]) -> dict[int, float]:
         if isinstance(obj, dict):
             for k, v in obj.items():
                 _store(k, v)
-    if not out:
-        for m in _SCORE_LINE.finditer(text or ""):
+    if not scores:
+        for m in _SCORE_LINE.finditer(text):
             _store(m.group(1), m.group(2))
-    return out
+
+    reasons: dict[int, str] = {}
+    for m in _REASON_LINE.finditer(text):
+        try:
+            i = int(m.group(1))
+        except (TypeError, ValueError):
+            continue
+        if i in valid_ids:
+            reasons[i] = m.group(2).strip()
+
+    return {i: (s, reasons.get(i, "")) for i, s in scores.items()}
 
 
-def normalize_and_rank(pool: list[dict], scores_by_model: dict[str, dict[int, float]]) -> list[dict]:
+def normalize_and_rank(
+    pool: list[dict], scores_by_model: dict[str, dict[int, tuple[float, str]]]
+) -> list[dict]:
     """Attach aggregate scores to each idea and return them ranked best-first.
 
     Each rater's scores are z-normalized (so a lenient or harsh model can't
     dominate), then averaged; ties broken by the raw mean. Ideas keep `score`
-    (raw mean, 0-10, for display) and `score_norm` (the ranking key).
+    (raw mean, 0-10, for display), `score_norm` (the ranking key), and `raters`
+    (per-model {model, score, reason} — who scored what and why, for the final
+    presentation). Under self-exclusion `n_scores` varies per idea (an
+    independent idea is rated by panel-minus-its-author; a debated idea by
+    everyone) — that's expected, z-scores are mean-centered per rater regardless
+    of how many ideas that rater saw.
     """
     # Per-model mean/std for z-normalization.
     stats: dict[str, tuple[float, float]] = {}
-    for model, scores in scores_by_model.items():
-        vals = list(scores.values())
+    for model, scored in scores_by_model.items():
+        vals = [s for s, _ in scored.values()]
         if not vals:
             continue
         mean = sum(vals) / len(vals)
@@ -113,19 +142,21 @@ def normalize_and_rank(pool: list[dict], scores_by_model: dict[str, dict[int, fl
 
     ranked: list[dict] = []
     for idea in pool:
-        raws, norms = [], []
-        for model, scores in scores_by_model.items():
-            if idea["id"] not in scores or model not in stats:
+        raws, norms, raters = [], [], []
+        for model, scored in scores_by_model.items():
+            if idea["id"] not in scored or model not in stats:
                 continue
-            raw = scores[idea["id"]]
+            raw, reason = scored[idea["id"]]
             mean, std = stats[model]
             raws.append(raw)
             norms.append((raw - mean) / std if std > 0 else 0.0)
+            raters.append({"model": model, "score": raw, "reason": reason})
         enriched = {
             **idea,
             "score": round(sum(raws) / len(raws), 2) if raws else 0.0,
             "score_norm": sum(norms) / len(norms) if norms else 0.0,
             "n_scores": len(raws),
+            "raters": raters,
         }
         ranked.append(enriched)
     ranked.sort(key=lambda i: (i["score_norm"], i["score"]), reverse=True)
@@ -152,15 +183,89 @@ def build_document(topic: str, sections: list[tuple[str, str]]) -> str:
     return "\n".join(parts)
 
 
+# A paperclip result entry looks like:
+#   1. Social Perception of Faces in a Vision-Language Model
+#      Carina I. Hausladen, Manuel Knott, Colin F. Camerer, Pietro Perona
+#      arx_2408.14435 · arXiv · 2024-08-26
+#      https://doi.org/10.1145/3715275.3732041
+#      "<abstract>"
+_PAPER_ENTRY = re.compile(
+    r"^\s*\d+\.\s+(?P<title>.+)\n"
+    r"\s+(?P<authors>.+)\n"
+    r"\s+(?P<id>\S+)\s*·\s*(?P<source>[^·\n]+?)\s*·\s*(?P<date>\S+)"
+    r"(?:\s*\n\s*(?P<url>https?://\S+))?",
+    re.MULTILINE,
+)
+
+
+def extract_references(trace: list[dict]) -> dict[str, dict]:
+    """Pull a deduped paper corpus (id -> citation fields) out of every
+    paperclip result seen anywhere in the session trace (propose + debate)."""
+    refs: dict[str, dict] = {}
+    for step in trace:
+        if step.get("type") != "tool":
+            continue
+        for m in _PAPER_ENTRY.finditer(step.get("content") or ""):
+            pid = m.group("id")
+            if pid in refs:
+                continue
+            refs[pid] = {
+                "title": m.group("title").strip(),
+                "authors": m.group("authors").strip(),
+                "source": m.group("source").strip(),
+                "date": m.group("date").strip(),
+                "url": (m.group("url") or "").strip(),
+            }
+    return refs
+
+
+def format_citation(pid: str, ref: dict) -> str:
+    bits = [ref["authors"], f"*{ref['title']}*", f"{ref['source']}, {ref['date']}", f"`{pid}`"]
+    if ref.get("url"):
+        bits.append(ref["url"])
+    return ". ".join(b for b in bits if b)
+
+
+def idea_bibliography(idea_text: str, refs: dict[str, dict]) -> str:
+    """The formatted citations for ids actually mentioned in this idea's text."""
+    cited = [pid for pid in refs if pid in idea_text]
+    if not cited:
+        return "(no resolvable citations)"
+    return "\n".join(f"{i}. {format_citation(pid, refs[pid])}" for i, pid in enumerate(cited, 1))
+
+
+def references_document(refs: dict[str, dict]) -> str:
+    """The full deduped session corpus, for the standalone references file."""
+    if not refs:
+        return "(no papers retrieved this session)"
+    return "\n".join(f"- {format_citation(pid, ref)}" for pid, ref in refs.items())
+
+
 # --- prompts -----------------------------------------------------------------
 
-def _panel_system(model: str, shared: bool) -> str:
+# Per-phase tool-call budgets, stated explicitly so panelists spend the
+# recursion limit (30, ≈15 tool-call rounds) deliberately rather than randomly
+# looping until they hit it — same pattern as the literature subagent's
+# 8-search cap (see agents/literature.py).
+_PHASE_BUDGETS = {
+    "propose": "You have a budget of roughly 8 tool calls (searches + reads) for "
+                "this phase. Plan your queries up front; don't re-run a search "
+                "you've already done. Stop searching once you have enough to "
+                "write strong, well-grounded ideas.",
+    "debate": "You have a budget of roughly 5 tool calls for this turn — search "
+              "only to settle a specific contested claim, not to re-survey the "
+              "field from scratch.",
+}
+
+
+def _panel_system(model: str, shared: bool, phase: str = "propose") -> str:
     mode = (
         "This is a SHARED debate: you see the other panelists and must engage them "
         "by name — merge, refine, or push back."
         if shared else
         "You are working ALONE; you cannot see the other panelists."
     )
+    budget = _PHASE_BUDGETS.get(phase, "")
     return (
         f"You are {model}, a frontier reasoning model on a research ideation panel. "
         f"{mode}\n\n"
@@ -171,8 +276,9 @@ def _panel_system(model: str, shared: bool) -> str:
         "            search -s pmc \"medical image segmentation transformer\"\n"
         "  For biomedical/clinical work search both arxiv AND pmc.\n"
         "• Tavily (web search) — for conference CFPs, blog posts, and non-paper sources.\n"
-        "SEARCH before claiming novelty or SOTA — verify citations; use real arXiv ids / DOIs.\n\n"
-        "Be rigorous and concrete: give the mathematical formulation (LaTeX) and a "
+        "SEARCH before claiming novelty or SOTA — verify citations; use real arXiv ids / DOIs.\n"
+        + (f"{budget}\n" if budget else "") +
+        "\nBe rigorous and concrete: give the mathematical formulation (LaTeX) and a "
         "theoretical justification or proof sketch where it matters, and for every "
         "proposed improvement state WHAT to change, WHERE, and WHY."
     )
@@ -181,7 +287,11 @@ def _panel_system(model: str, shared: bool) -> str:
 _IDEA_FORMAT = (
     f"Start EACH idea with a line `{IDEA_MARKER}` followed by: **Title**; **Problem "
     "& motivation**; **Novelty** vs cited prior work; **Method** with key "
-    "formulae/derivation; **What/Where/Why** it improves; **Expected contribution**."
+    "formulae/derivation; **What/Where/Why** it improves; **Expected contribution**. "
+    "Cite prior work inline using the paperclip id exactly as returned by search "
+    "(e.g. `arx_2408.14435`, `PMC1234567`), not just a paper title or journal name — "
+    "the bibliography is built by matching these ids, so an uncited or prose-only "
+    "reference (\"Nature 2024\") won't resolve into it."
 )
 
 _PROPOSE_INDEP = (
@@ -202,27 +312,38 @@ _DEBATE_REACT = (
     "novel synthesis no single opening reached. SEARCH to settle any contested claim."
 )
 
-_DEBATE_EXTRACT = (
-    "The debate is over. Submit your SINGLE strongest idea that emerged from it "
-    f"(it may be a synthesis). {_IDEA_FORMAT} Output only that one idea."
+# Chair-side extraction: ONE call over the full transcript, not one per panelist.
+# The resulting ideas are panel syntheses with no single owner (author: "panel"),
+# so there's no anonymity to preserve and no self-exclusion to bookkeep for them.
+_DEBATE_EXTRACT_CHAIR = (
+    "The panel debate below is over. From the FULL transcript, extract EXACTLY 2 "
+    "distinct ideas that emerged — the two strongest, genuinely different "
+    "directions (not two phrasings of the same idea; if the debate converged on "
+    "one direction, extract that one plus the strongest dissenting alternative "
+    f"that was raised). {_IDEA_FORMAT} Output exactly 2 ideas, nothing else."
 )
 
+# Appended as a HUMAN turn onto each panelist's OWN independent-track thread (never
+# the debate thread — a model that argued for a debated idea is invested in it, and
+# scoring it from that thread would reward participation, not merit). Continuing a
+# thread means the system prompt can't be swapped, so the expert-evaluator framing
+# has to be fully established here rather than in a fresh system message. No tools
+# are bound for this call: it's a single, additive, tool-free turn.
 _SCORE = (
-    "Score EACH idea below for a top (Q1) venue, 0-10. CALIBRATE HARD — do NOT "
-    "cluster around 7. Anchor: 0-2 unacceptable/flawed; 3-4 weak; 5-6 incremental; "
-    "7 solid but NOT top-venue; 8-9 genuinely Q1; 10 landmark. Use the FULL range — "
-    "at least one idea ≤4 and at least one ≥8 — and let no more than two "
-    "ideas share a score. SEARCH if you need to verify novelty. Output a JSON object "
-    "mapping idea number to score, e.g. {\"1\": 8, \"2\": 3}, then one line per idea "
-    "as `#N: <one-sentence justification>`."
+    "Forget the tools — for this turn you are acting purely as an independent "
+    "expert reviewer in this research field, scoring from domain knowledge you "
+    "already have (including whatever you found earlier in this conversation). "
+    "Do NOT search or call any tool; if you're unsure, judge on the idea's stated "
+    "claims and citations as written.\n\n"
+    "Score EACH idea below for a top (Q1) venue, 0-10, the way a rigorous Q1 "
+    "reviewer would. CALIBRATE HARD — do NOT cluster around 7. Anchor: 0-2 "
+    "unacceptable/flawed; 3-4 weak; 5-6 incremental; 7 solid but NOT top-venue; "
+    "8-9 genuinely Q1; 10 landmark. Use the FULL range across the pool below, and "
+    "let no more than two ideas share a score.\n\n"
+    "Output a JSON object mapping idea number to score, e.g. {\"1\": 8, \"2\": 3}, "
+    "then one line per idea as `#N: <1-2 sentence reason>`. If you cannot score an "
+    "idea at all, omit its number rather than guessing."
 )
-
-_VOTE = (
-    "These are polished proposals. Vote by scoring EACH 0-10 on Q1-readiness using "
-    "the same hard calibration (no clustering at 7; use the full range). Output the "
-    "JSON object of number->score, then `#N: <justification>` per proposal."
-)
-
 
 def _brief_prompt(topic: str, focus: str) -> str:
     extra = f"\nThe researcher emphasizes: {focus}" if focus else ""
@@ -233,27 +354,6 @@ def _brief_prompt(topic: str, focus: str) -> str:
         "any constraints, and what to search for. Two short paragraphs, no preamble."
         f"\n\nTopic: {topic}{extra}"
     )
-
-
-def _polish_indep_prompt(instructions: str) -> str:
-    return (
-        "Polish the idea below into a rigorous, submission-ready proposal: full "
-        "methodology, concrete methods, and proofs/derivations for the core claims. "
-        "SEARCH deeper to ground every choice and citation. Keep the original "
-        f"contribution but make it defensible at a top venue.\n\n{instructions}"
-    )
-
-_POLISH_DEBATE_OPEN = (
-    "Debate how to harden the idea below for a top venue: the methodology, the "
-    "methods, and the proofs/derivations. Raise the hardest objections and how to "
-    "answer them. SEARCH for the standard baselines, datasets, and protocols."
-)
-
-_POLISH_DEBATE_FINAL = (
-    "The debate is over. Write the consolidated polished proposal the panel "
-    "converged on: rigorous methodology, methods, and proofs/derivations, with "
-    "cited baselines and an experiment plan. Clean Markdown; keep LaTeX for math."
-)
 
 
 class Consortium:
@@ -303,6 +403,28 @@ class Consortium:
             logger.exception("Consortium agent %s failed", model)
             return f"[{model} could not respond: {exc}]", []
 
+    async def _say_plain(self, model: str, messages: list) -> tuple[str, list]:
+        """One tool-free turn appended to an existing message history.
+
+        Unlike `_agent_say`, this never builds a ReAct agent or binds tools — it
+        calls the chat model directly. Used for scoring (continuing a panelist's
+        own propose-phase thread) and chair debate-extraction: both are single,
+        additive, non-agentic turns with no search loop and so no recursion-limit
+        exposure. Because the thread already carries its system message (from
+        whichever `_agent_say` call started it), the framing for this turn must
+        live in the new instruction itself — there's no system prompt to swap.
+        """
+        from ..llm import build_openrouter_chat
+
+        llm = build_openrouter_chat(model, self.temperature, max_tokens=2000)
+        try:
+            reply = await llm.ainvoke(messages)
+            new_messages = messages + [reply]
+            return _flatten(reply.content), new_messages
+        except Exception as exc:  # noqa: BLE001 — one model failing must not abort
+            logger.exception("Consortium agent %s failed (plain turn)", model)
+            return f"[{model} could not respond: {exc}]", messages
+
     # -- chair --
 
     async def make_brief(self, topic: str, focus: str = "") -> tuple[str, list]:
@@ -313,22 +435,43 @@ class Consortium:
 
     # -- round 1: the two idea tracks --
 
-    async def propose_independent(self, brief: str) -> tuple[list[dict], list]:
-        """Each panelist proposes 3 ideas ALONE (in parallel)."""
+    async def propose_independent(
+        self, brief: str
+    ) -> tuple[list[dict], dict[str, list], list]:
+        """Each panelist proposes 3 ideas ALONE (in parallel).
+
+        Returns the ideas, each model's raw message history (system + human +
+        tool turns), and the trace. The message histories are kept so scoring
+        can later CONTINUE each model's own thread instead of starting fresh —
+        a model judges with the literature context it already built, and never
+        the (potentially groupthink-biased) debate transcript.
+        """
         instruction = f"Research brief:\n{brief}\n\n{_PROPOSE_INDEP}"
         results = await asyncio.gather(*(
-            self._agent_say(m, _panel_system(m, shared=False), instruction)
+            self._agent_say(m, _panel_system(m, shared=False, phase="propose"), instruction)
             for m in self.panel
         ))
-        ideas, trace = [], []
+        ideas, threads, trace = [], {}, []
         for model, (text, msgs) in zip(self.panel, results, strict=True):
             trace += _collect(f"{model}:propose", msgs)
-            for body in parse_ideas(text, max_n=3):
+            threads[model] = msgs
+            for body in parse_ideas(text, max_n=3, model=model):
                 ideas.append({"text": body, "source": "independent", "by": model})
-        return ideas, trace
+        return ideas, threads, trace
 
     async def debate_ideas(self, brief: str, prior: str = "") -> tuple[list[dict], list[tuple[str, str]], list]:
-        """A shared debate (blind to the independents); each submits its best idea."""
+        """A shared debate (blind to the independents), then chair extraction.
+
+        With `debate_turns=1` this is a single opening pass per panelist — there's
+        no dedicated "engage by name" round, so what gets extracted is closer to
+        "best of the opening positions" than an emergent synthesis; the chair
+        prompt still asks for the two strongest *distinct* directions raised.
+
+        Extraction is ONE chair call over the whole transcript (not one call per
+        panelist): the resulting ideas are panel syntheses with no single author,
+        so there's nothing to anonymize and no self-exclusion to bookkeep for
+        them downstream.
+        """
         transcript: list[tuple[str, str]] = [("Brief", brief)]
         if prior:
             transcript.append(("Prior debate insights (memory)", prior))
@@ -337,88 +480,91 @@ class Consortium:
             instruction = _DEBATE_OPEN if turn == 0 else _DEBATE_REACT
             for model in self.panel:
                 text, msgs = await self._agent_say(
-                    model, _panel_system(model, shared=True), instruction, transcript
+                    model, _panel_system(model, shared=True, phase="debate"), instruction, transcript
                 )
                 transcript.append((model, text))
                 trace += _collect(f"{model}:debate{turn + 1}", msgs)
-        # Extraction: each panelist's single strongest debate-born idea.
-        ideas: list[dict] = []
-        extracts = await asyncio.gather(*(
-            self._agent_say(m, _panel_system(m, shared=True), _DEBATE_EXTRACT, transcript)
-            for m in self.panel
-        ))
-        for model, (text, msgs) in zip(self.panel, extracts, strict=True):
-            trace += _collect(f"{model}:extract", msgs)
-            picked = parse_ideas(text, max_n=1)
-            if picked:
-                ideas.append({"text": picked[0], "source": "debated", "by": model})
+        text, msgs = await self._agent_say(
+            self.chair_model, "You are the research chair.", _DEBATE_EXTRACT_CHAIR, transcript
+        )
+        trace += _collect("chair:extract", msgs)
+        ideas = [
+            {"text": body, "source": "debated", "by": "panel"}
+            for body in parse_ideas(text, max_n=2, model="chair")
+        ]
         return ideas, transcript, trace
 
-    async def score_pool(self, pool: list[dict], instruction: str = _SCORE) -> tuple[dict[str, dict[int, float]], list]:
-        """Every panelist scores every idea (in parallel, anonymized)."""
-        valid = {i["id"] for i in pool}
-        listing = "\n\n".join(f"#{i['id']}:\n{i['text']}" for i in pool)
-        prompt = f"{instruction}\n\nIdeas:\n\n{listing}"
-        results = await asyncio.gather(*(
-            self._agent_say(m, _panel_system(m, shared=False), prompt) for m in self.panel
-        ))
-        scores: dict[str, dict[int, float]] = {}
+    async def score_round1(
+        self, pool: list[dict], propose_threads: dict[str, list]
+    ) -> tuple[dict[str, dict[int, tuple[float, str]]], list[str], list]:
+        """Score the round-1 pool: threaded, self-excluding, tool-free.
+
+        Each model scores by continuing its OWN independent/propose-phase
+        thread — never the debate thread, so a panelist who argued for a
+        debated idea isn't scoring from a context where it's already invested
+        in that idea. The call is a single additive, tool-free turn (no
+        ToolNode bound), so it carries none of the runaway-loop risk a fresh
+        tool-using agent call would.
+
+        Self-exclusion: a model's own independent idea(s) are omitted from its
+        own ballot (the pool's `by` field is the only author record — there is
+        no separate anonymity-bookkeeping structure to maintain). Debated ideas
+        have no single author (`by == "panel"`) so every model scores them.
+
+        A model that returns no parseable score at all is recorded as a failed
+        ballot rather than silently dropped.
+        """
+        from langchain_core.messages import HumanMessage
+
+        scores: dict[str, dict[int, tuple[float, str]]] = {}
+        flags: list[str] = []
         trace: list = []
-        for model, (text, msgs) in zip(self.panel, results, strict=True):
-            trace += _collect(f"{model}:score", msgs)
+
+        async def _score_one(model: str) -> None:
+            ballot = [
+                idea for idea in pool
+                if not (idea.get("source") == "independent" and idea.get("by") == model)
+            ]
+            valid = {i["id"] for i in ballot}
+            listing = "\n\n".join(f"#{i['id']}:\n{i['text']}" for i in ballot)
+            prompt = f"{_SCORE}\n\nIdeas:\n\n{listing}"
+            thread = propose_threads.get(model) or []
+            if not thread:
+                flags.append(f"{model} had no propose-phase thread to score from")
+                return
+            text, new_thread = await self._say_plain(model, thread + [HumanMessage(content=prompt)])
+            trace.extend(_collect(f"{model}:score", new_thread[len(thread):]))
             parsed = parse_scores(text, valid)
-            if parsed:
-                scores[model] = parsed
-        return scores, trace
+            if not parsed:
+                flags.append(f"{model} failed to vote")
+                return
+            scores[model] = parsed
 
-    async def vote_pool(self, pool: list[dict]) -> tuple[dict[str, dict[int, float]], list]:
-        """Panelists vote on polished proposals (re-score with the vote rubric)."""
-        return await self.score_pool(pool, instruction=_VOTE)
+        await asyncio.gather(*(_score_one(m) for m in self.panel))
+        return scores, flags, trace
 
-    # -- round 2: polish (both tracks) --
-
-    async def polish_idea(self, idea_text: str, instructions: str,
-                          prior: str = "") -> tuple[list[dict], dict | None, list[tuple[str, str]], list]:
-        instr = instructions or "Develop this idea into its strongest form."
-        block = f"{instr}\n\nIdea:\n{idea_text}"
-        # Independent polish (each panelist alone, in parallel).
-        indep = await asyncio.gather(*(
-            self._agent_say(m, _panel_system(m, shared=False), _polish_indep_prompt(block))
-            for m in self.panel
-        ))
-        proposals, trace = [], []
-        for model, (text, msgs) in zip(self.panel, indep, strict=True):
-            trace += _collect(f"{model}:polish", msgs)
-            if text and not text.startswith("["):
-                proposals.append({"text": text, "source": "independent", "by": model})
-        # Debated polish (shared conversation, blind to the independent polishes).
-        transcript: list[tuple[str, str]] = [("Idea to harden", idea_text), ("Chair", instr)]
-        if prior:
-            transcript.append(("Prior debate insights (memory)", prior))
-        for model in self.panel:
-            text, msgs = await self._agent_say(
-                model, _panel_system(model, shared=True), _POLISH_DEBATE_OPEN, transcript
-            )
-            transcript.append((model, text))
-            trace += _collect(f"{model}:polish-debate", msgs)
-        final, msgs = await self._agent_say(
-            self.chair_model, "You are the research chair.", _POLISH_DEBATE_FINAL, transcript
-        )
-        trace += _collect("chair:polish-final", msgs)
-        debated = {"text": final, "source": "debated", "by": "panel"} if final and not final.startswith("[") else None
-        return proposals, debated, transcript, trace
-
-    def _save(self, topic: str, document: str) -> tuple[str, str]:
+    def _save(
+        self, topic: str, document: str, references: str | None = None
+    ) -> tuple[str, str, str | None, str | None]:
+        """Write the proposal doc and, if given, a sibling references file
+        sharing the same slug+timestamp (so the pairing is obvious on disk)."""
         from ..writing.latex import slugify
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        name = f"{slugify(topic)}-{stamp}.md"
+        slug = slugify(topic)
+        name = f"{slug}-{stamp}.md"
         (self.output_dir / name).write_text(document)
-        return str(self.output_dir / name), f"ideas/{name}"
+        path, rel_path = str(self.output_dir / name), f"ideas/{name}"
+        if references is None:
+            return path, rel_path, None, None
+        ref_name = f"{slug}-{stamp}-references.md"
+        (self.output_dir / ref_name).write_text(references)
+        return path, rel_path, str(self.output_dir / ref_name), f"ideas/{ref_name}"
 
     async def ideate(self, topic: str, focus: str = "") -> dict:
-        """Non-interactive: round 1 only (propose + score), return the top 5."""
+        """Non-interactive, single round: propose, debate, score. Returns
+        every idea that passed the output contract, ranked — no top-N cut."""
         session = self.new_session(topic, focus)
         await session.run_round1()
         return await session.finalize()
@@ -440,22 +586,21 @@ def _collect(speaker: str, messages: list) -> list[dict]:
 
 
 class ConsortiumSession:
-    """A live, per-channel ideation session: propose+score -> select -> polish+vote."""
+    """A live, per-channel ideation session: a single propose+debate+score round."""
 
     def __init__(self, consortium: Consortium, topic: str, focus: str = ""):
         self.c = consortium
         self.topic = topic
         self.focus = focus
-        self.phase = "new"          # new -> scored -> polished -> done
+        self.phase = "new"          # new -> scored -> done
         self.brief = ""
         self.pool: list[dict] = []          # all ideas this round, with ids + scores
         self.ranked: list[dict] = []        # pool sorted best-first
-        self.top: list[dict] = []           # what was shown to the researcher
-        self.selected: list[dict] = []      # round-1 ideas the researcher chose
+        self.top: list[dict] = []           # every surviving idea, ranked (no cut)
         self.debate_transcripts: list[tuple[str, str]] = []  # (label, rendered)
         self.trace: list[dict] = []
+        self.flags: list[str] = []          # e.g. "qwen/qwen3.7-plus failed to vote"
         self.round_no = 0
-        self.busy = False
         self.finalized = False
 
     @property
@@ -471,82 +616,70 @@ class ConsortiumSession:
             return ""
 
     async def run_round1(self) -> list[dict]:
-        """Propose (independent + debated), score the merged pool, return top 5."""
+        """Propose (independent + debated), score the merged pool.
+
+        Single round, no top-N cut: every idea that passed the output contract
+        is scored and returned, ranked best-first.
+        """
         self.round_no = 1
         self.brief, brief_trace = await self.c.make_brief(self.topic, self.focus)
         self.trace += brief_trace
         prior = await self._prior()
 
-        independent, t1 = await self.c.propose_independent(self.brief)
+        independent, propose_threads, t1 = await self.c.propose_independent(self.brief)
         debated, debate_tx, t2 = await self.c.debate_ideas(self.brief, prior)
         self.debate_transcripts.append(("Round 1 — idea debate", render_transcript(debate_tx)))
         self.trace += t1 + t2
 
         self.pool = [{**idea, "id": n} for n, idea in enumerate(independent + debated, 1)]
-        scores, t3 = await self.c.score_pool(self.pool)
+        scores, flags, t3 = await self.c.score_round1(self.pool, propose_threads)
         self.trace += t3
+        self.flags = flags
         self.ranked = normalize_and_rank(self.pool, scores)
-        self.top = self.ranked[:5]
+        self.top = self.ranked
         self.phase = "scored"
         return self.top
 
-    async def select_and_polish(self, picks: list[int] | None = None, comments: str = "") -> list[dict]:
-        """Polish the chosen ideas (both tracks) and vote; return top 5 (or all).
-
-        `picks` selects from the round-1 top (and is remembered); pass None on a
-        follow-up round to re-polish the same selection with new `comments`.
-        """
-        if picks is not None:
-            matched = [i for i in self.top if i["id"] in set(picks)]
-            if not matched:
-                logger.warning("No ideas matched picks %s; using the top idea.", picks)
-            self.selected = matched or self.top[:1]
-        chosen = self.selected or self.top[:1]
-        self.round_no += 1
-        prior = await self._prior()
-        instructions = (
-            f"Researcher's notes for this round: {comments}" if comments else
-            "Develop this into its strongest, most defensible form."
-        )
-
-        polished: list[dict] = []
-        for idea in chosen:
-            indep, debated, tx, tr = await self.c.polish_idea(idea["text"], instructions, prior)
-            self.debate_transcripts.append(
-                (f"Round {self.round_no} — polish debate (idea #{idea['id']})", render_transcript(tx))
-            )
-            self.trace += tr
-            polished += indep
-            if debated is not None:
-                polished.append(debated)
-
-        self.pool = [{**p, "id": n} for n, p in enumerate(polished, 1)]
-        votes, tv = await self.c.vote_pool(self.pool)
-        self.trace += tv
-        self.ranked = normalize_and_rank(self.pool, votes)
-        self.top = self.ranked if len(self.ranked) <= 5 else self.ranked[:5]
-        self.phase = "polished"
-        return self.top
-
     def render_top(self) -> str:
-        """A numbered, scored synopsis of the current top ideas for Discord."""
+        """A numbered, scored synopsis of every ranked idea, with author and
+        the reasons raters gave — for Discord and for the methodology handoff."""
         if not self.top:
             return "(no ideas yet)"
         lines = []
+        if self.flags:
+            lines.append("⚠️ " + "; ".join(self.flags))
         for idea in self.top:
-            tag = "🤝 debated" if idea.get("source") == "debated" else "🧠 independent"
-            lines.append(
-                f"**#{idea['id']} · {idea['score']:.1f}/10 · {tag}**\n{idea_synopsis(idea['text'])}"
+            author = "debated (panel)" if idea.get("source") == "debated" else idea.get("by", "?")
+            reasons = "; ".join(
+                f"{r['model']}: {r['reason']}" for r in idea.get("raters", []) if r.get("reason")
             )
+            line = f"**#{idea['id']} · {idea['score']:.1f}/10 · author: {author}**\n{idea_synopsis(idea['text'])}"
+            if reasons:
+                line += f"\n_Reasons: {reasons}_"
+            lines.append(line)
         return "\n\n".join(lines)
 
     async def finalize(self) -> dict:
-        document = build_document(
-            self.topic,
-            [(f"#{i['id']} ({i['score']:.1f}/10, {i['source']})", i["text"]) for i in self.top]
-            + self.debate_transcripts,
+        refs = extract_references(self.trace)
+        sections = []
+        for i in self.top:
+            author = "debated (panel)" if i.get("source") == "debated" else i.get("by", "?")
+            heading = f"#{i['id']} — {i['score']:.1f}/10 — author: {author}"
+            reasons = "\n".join(
+                f"- {r['model']}: {r['reason']}" for r in i.get("raters", []) if r.get("reason")
+            )
+            body = (
+                f"{i['text']}\n\n"
+                f"**Reviewer notes**\n{reasons or '(no reasons recorded)'}\n\n"
+                f"**Bibliography**\n{idea_bibliography(i['text'], refs)}"
+            )
+            sections.append((heading, body))
+        if self.flags:
+            sections.append(("Flags", "\n".join(f"- {f}" for f in self.flags)))
+        document = build_document(self.topic, sections + self.debate_transcripts)
+        path, rel_path, ref_path, rel_ref_path = self.c._save(
+            self.topic, document, references_document(refs)
         )
-        path, rel_path = self.c._save(self.topic, document)
         self.finalized = True
         self.phase = "done"
         return {
@@ -555,6 +688,9 @@ class ConsortiumSession:
             "debate_transcripts": self.debate_transcripts,
             "path": path,
             "rel_path": rel_path,
+            "references_path": ref_path,
+            "rel_references_path": rel_ref_path,
+            "flags": self.flags,
             "n_models": len(self.panel),
             "rounds": self.round_no,
             "trace": self.trace,
