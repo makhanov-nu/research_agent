@@ -32,8 +32,22 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Per-request wall-clock timeout (seconds) for every consortium model call, so a
+# single stalled DeepInfra/OpenRouter request can't freeze the whole round (seen
+# in a dry-run: one call hung ~12 min). A reasoning model emitting 6k tokens can
+# legitimately take ~70s, so this is generous.
+_REQUEST_TIMEOUT = 300.0
+
 IDEA_MARKER = "=== IDEA ==="
-_IDEA_SPLIT = re.compile(re.escape(IDEA_MARKER), re.IGNORECASE)
+# Line-start anchored (multiline): only a marker that begins its own line splits
+# an idea. A quoted/inline `"=== IDEA ==="` mid-sentence (which reasoning models
+# love to do when restating the output format) must NOT create a spurious split.
+_IDEA_SPLIT = re.compile(r"(?im)^[ \t]*" + re.escape(IDEA_MARKER))
+# A well-formed <think>...</think> reasoning block (non-greedy, any case, spans
+# newlines). Reasoning models (e.g. deepseek-r1) emit these inline in message
+# content; the scaffolding inside must never reach the idea/score parser.
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_THINK_TAG = re.compile(r"</?think>", re.IGNORECASE)
 _SCORE_LINE = re.compile(r"#?\s*(\d+)\s*[:=\-]\s*(\d+(?:\.\d+)?)")
 _REASON_LINE = re.compile(r"^\s*#\s*(\d+)\s*:\s*(.+)$", re.MULTILINE)
 _JSON_OBJ = re.compile(r"\{[^{}]*\}", re.DOTALL)
@@ -47,6 +61,64 @@ def _flatten(content) -> str:
     return content if isinstance(content, str) else str(content)
 
 
+def _strip_reasoning(text: str) -> str:
+    """Remove inline `<think>...</think>` reasoning blocks from model output.
+
+    Reasoning models (e.g. deepseek-r1, the consortium chair) emit their chain of
+    thought as a `<think>...</think>` block inline in the message *content*, with
+    the real answer after `</think>`. That scratchpad routinely restates the
+    required output format — including the literal `=== IDEA ===` marker and JSON
+    score examples — which then masquerades as real ideas/scores at the parse
+    boundary (see council_31). We strip well-formed blocks first, then any stray
+    lone `<think>`/`</think>` tag left by truncation. Text with no think tags is
+    returned unchanged.
+
+    Strip ONLY at the parse boundary (parse_ideas/parse_scores), never in
+    _flatten: the dashboard trace (serialize_messages) intentionally preserves
+    reasoning.
+    """
+    text = _THINK_BLOCK.sub("", text or "")
+    return _THINK_TAG.sub("", text)
+
+
+# Literal template placeholders that only ever appear in the OUTPUT-FORMAT
+# scaffold the panel/chair is asked to fill in — never in a real, written idea.
+_SCAFFOLD_PLACEHOLDERS = (
+    "[Concise name]",
+    "[1-2 sentences]",
+    "[Key equations",
+    "[Specific improvements",
+    "[Theoretical/empirical",
+)
+# A generic "[ ... ]" bracketed placeholder token (no nested brackets). Two or
+# more of these in one segment is a strong template-leak signal; real ideas may
+# carry the odd `[1]`-style reference, so a SINGLE one is tolerated.
+_BRACKET_PLACEHOLDER = re.compile(r"\[[^\[\]]+\]")
+
+
+def _looks_like_idea(seg: str) -> bool:
+    """Reject-on-signal guard: does this segment look like a real idea, not a
+    leaked output-format scaffold or reasoning fragment?
+
+    DEFAULT ACCEPT — only reject on a clear scaffolding signal, so short toy
+    bodies ("First", "The Idea") used elsewhere still pass. The think-strip is
+    the primary defense; this is belt-and-suspenders for a VISIBLE leak that
+    survived it (e.g. a malformed/unclosed think block, or a template echoed
+    outside any think tags).
+    """
+    low = seg.lower()
+    # A residual think tag means reasoning leaked through unstripped.
+    if "<think>" in low or "</think>" in low:
+        return False
+    # Any literal template placeholder is a dead giveaway of the scaffold.
+    if any(ph.lower() in low for ph in _SCAFFOLD_PLACEHOLDERS):
+        return False
+    # Several generic "[...]" placeholders together = an unfilled template.
+    if len(_BRACKET_PLACEHOLDER.findall(seg)) >= 2:
+        return False
+    return True
+
+
 # --- pure helpers (unit-tested) ----------------------------------------------
 
 def parse_ideas(text: str, max_n: int = 3, *, model: str = "") -> list[str]:
@@ -58,6 +130,10 @@ def parse_ideas(text: str, max_n: int = 3, *, model: str = "") -> list[str]:
     rather than silently entering the pool as a raw, unstructured blob.
     """
     text = (text or "").strip()
+    # Drop reasoning-model scratchpad first: a <think> block routinely restates
+    # the format template (literal "=== IDEA ===" + placeholders), which would
+    # otherwise split out as bogus ideas ahead of the real ones (council_31).
+    text = _strip_reasoning(text)
     if not text or (text.startswith("[") and "could not" in text[:80]):
         return []
     if IDEA_MARKER.lower() not in text.lower():
@@ -68,6 +144,9 @@ def parse_ideas(text: str, max_n: int = 3, *, model: str = "") -> list[str]:
         return []
     # split()[1:] discards the segment before the first marker (the preamble).
     parts = [p.strip() for p in _IDEA_SPLIT.split(text)[1:] if p.strip()]
+    # Belt-and-suspenders: drop any segment that is clearly a leaked template /
+    # reasoning fragment BEFORE the cap, so it can't consume a real idea's slot.
+    parts = [p for p in parts if _looks_like_idea(p)]
     return parts[:max_n]
 
 
@@ -82,6 +161,9 @@ def parse_scores(text: str, valid_ids: set[int]) -> dict[int, tuple[float, str]]
     as "the model scored nothing on purpose."
     """
     text = text or ""
+    # Strip reasoning-model scratchpad: a <think> block can contain example JSON
+    # ({"1": 8, ...}) or score lines that would corrupt the real ballot.
+    text = _strip_reasoning(text)
     scores: dict[int, float] = {}
 
     def _store(key, val) -> None:
@@ -117,7 +199,9 @@ def parse_scores(text: str, valid_ids: set[int]) -> dict[int, tuple[float, str]]
 
 
 def normalize_and_rank(
-    pool: list[dict], scores_by_model: dict[str, dict[int, tuple[float, str]]]
+    pool: list[dict],
+    scores_by_model: dict[str, dict[int, tuple[float, str]]],
+    min_raters: int = 1,
 ) -> list[dict]:
     """Attach aggregate scores to each idea and return them ranked best-first.
 
@@ -129,6 +213,12 @@ def normalize_and_rank(
     independent idea is rated by panel-minus-its-author; a debated idea by
     everyone) — that's expected, z-scores are mean-centered per rater regardless
     of how many ideas that rater saw.
+
+    Ideas scored by fewer than `min_raters` raters are EXCLUDED from the ranked
+    output (default 1 drops zero-rater ideas). Shipping a "consensus" rank for an
+    idea nobody scored — its `score` would silently default to 0.0 — is a
+    scoring-integrity bug (see council_31), so such ideas are dropped entirely
+    rather than ranked at a fictitious 0.
     """
     # Per-model mean/std for z-normalization.
     stats: dict[str, tuple[float, float]] = {}
@@ -158,6 +248,10 @@ def normalize_and_rank(
             "n_scores": len(raws),
             "raters": raters,
         }
+        # Drop ideas nobody (or too few) scored: an unscored idea would ship at a
+        # fictitious 0.0 "consensus" score (council_31). Default min_raters=1.
+        if enriched["n_scores"] < min_raters:
+            continue
         ranked.append(enriched)
     ranked.sort(key=lambda i: (i["score_norm"], i["score"]), reverse=True)
     return ranked
@@ -386,7 +480,8 @@ class Consortium:
 
         # handle_tool_errors moved from create_react_agent to ToolNode in LangGraph 1.x
         agent = create_react_agent(
-            build_openrouter_chat(model, self.temperature, max_tokens=6000),
+            build_openrouter_chat(model, self.temperature, max_tokens=6000,
+                                  timeout=_REQUEST_TIMEOUT),
             ToolNode(self.tools, handle_tool_errors=True), prompt=system,
         )
         if transcript:
@@ -425,13 +520,43 @@ class Consortium:
             logger.exception("Consortium agent %s failed (plain turn)", model)
             return f"[{model} could not respond: {exc}]", messages
 
+    # -- graph seams (stubbable; the graph nodes build their LLMs through here) --
+
+    def _chat(self, model: str, *, max_tokens: int, with_tools: bool = False):
+        """Build a chat model for a graph node; tool-bind only when asked.
+
+        The single seam the panelist/scorer nodes construct LLMs through, so an
+        offline smoke-run (or a test) can stub model behaviour by overriding this.
+        """
+        from ..llm import build_openrouter_chat
+
+        llm = build_openrouter_chat(
+            model, self.temperature, max_tokens=max_tokens, timeout=_REQUEST_TIMEOUT
+        )
+        if with_tools and self.tools:
+            llm = llm.bind_tools(self.tools)
+        return llm
+
+    async def _prior(self, topic: str) -> str:
+        """Recalled prior-debate insights (seeds the debate track); "" if none."""
+        if self.recall is None:
+            return ""
+        try:
+            return await self.recall(topic) or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
     # -- chair --
 
     async def make_brief(self, topic: str, focus: str = "") -> tuple[str, list]:
         text, msgs = await self._agent_say(
             self.chair_model, "You are a precise research chair.", _brief_prompt(topic, focus)
         )
-        return text, _collect("chair:brief", msgs)
+        # Strip the chair's <think> block from the brief: it's fed to every
+        # panelist as their instruction and saved into the debate transcript, so
+        # a reasoning-model scratchpad there wastes tokens and clutters the doc.
+        # The trace (_collect) keeps the full reasoning for the dashboard.
+        return _strip_reasoning(text).strip(), _collect("chair:brief", msgs)
 
     # -- round 1: the two idea tracks --
 
@@ -616,27 +741,31 @@ class ConsortiumSession:
             return ""
 
     async def run_round1(self) -> list[dict]:
-        """Propose (independent + debated), score the merged pool.
+        """Run one consortium round by compiling and invoking the StateGraph.
 
-        Single round, no top-N cut: every idea that passed the output contract
-        is scored and returned, ranked best-first.
+        brief → propose (fan-out) → debate → extract → assemble → score
+        (fan-out, +chair) → aggregate. The graph's final state is mapped back
+        onto this session's attributes so `finalize()` (and the bot's
+        interactive flow) keep their existing contract. Single round, no top-N
+        cut: every idea that passed the output contract is scored and ranked.
         """
+        from .graph import build_consortium_graph
+
         self.round_no = 1
-        self.brief, brief_trace = await self.c.make_brief(self.topic, self.focus)
-        self.trace += brief_trace
-        prior = await self._prior()
-
-        independent, propose_threads, t1 = await self.c.propose_independent(self.brief)
-        debated, debate_tx, t2 = await self.c.debate_ideas(self.brief, prior)
-        self.debate_transcripts.append(("Round 1 — idea debate", render_transcript(debate_tx)))
-        self.trace += t1 + t2
-
-        self.pool = [{**idea, "id": n} for n, idea in enumerate(independent + debated, 1)]
-        scores, flags, t3 = await self.c.score_round1(self.pool, propose_threads)
-        self.trace += t3
-        self.flags = flags
-        self.ranked = normalize_and_rank(self.pool, scores)
+        app = build_consortium_graph(self.c)
+        final = await app.ainvoke(
+            {"topic": self.topic, "focus": self.focus},
+            config={"recursion_limit": 60},
+        )
+        self.brief = final.get("brief", "")
+        self.pool = final.get("pool", [])
+        self.ranked = final.get("ranked", [])
         self.top = self.ranked
+        self.flags = final.get("flags", [])
+        self.trace = final.get("trace", [])
+        self.debate_transcripts = [
+            ("Round 1 — idea debate", render_transcript(final.get("transcript", [])))
+        ]
         self.phase = "scored"
         return self.top
 

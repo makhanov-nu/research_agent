@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 
 def _openai_compat(
-    model: str, temperature: float, max_tokens: int, api_key: str, base_url: str
+    model: str, temperature: float, max_tokens: int, api_key: str, base_url: str,
+    timeout: float | None = None,
 ) -> BaseChatModel:
     from langchain_openai import ChatOpenAI
 
@@ -27,6 +28,7 @@ def _openai_compat(
         max_tokens=max_tokens,
         api_key=api_key or None,
         base_url=base_url,
+        timeout=timeout,
     )
 
 
@@ -71,19 +73,24 @@ def get_llm() -> BaseChatModel:
 
 
 def build_openrouter_chat(
-    model: str, temperature: float = 0.6, max_tokens: int = 4096
+    model: str, temperature: float = 0.6, max_tokens: int = 4096,
+    timeout: float | None = None,
 ) -> BaseChatModel:
     """Build a chat model for a specific model slug using the configured provider.
 
     Used by the consortium and reflection step. Routes to OpenRouter or DeepInfra
     depending on LLM_PROVIDER; both are OpenAI-compatible with the same model slugs.
+
+    `timeout` (seconds) bounds a single request so one stalled provider call can't
+    hang the caller indefinitely; default None preserves the prior no-timeout
+    behaviour for existing callers.
     """
     provider = settings.llm_provider.lower()
     if provider == "deepinfra":
         return _openai_compat(model, temperature, max_tokens,
-                              settings.deepinfra_api_key, settings.deepinfra_base_url)
+                              settings.deepinfra_api_key, settings.deepinfra_base_url, timeout)
     return _openai_compat(model, temperature, max_tokens,
-                          settings.openrouter_api_key, settings.openrouter_base_url)
+                          settings.openrouter_api_key, settings.openrouter_base_url, timeout)
 
 
 def build_reflection_llm() -> BaseChatModel:
