@@ -301,7 +301,7 @@ def build_consortium_graph(c):
         prompt = f"{_SCORE}\n\nIdeas:\n\n{listing}"
         thread = payload.get("thread") or []
         messages = (
-            thread + [HumanMessage(content=prompt)] if thread
+            [*thread, HumanMessage(content=prompt)] if thread
             else [SystemMessage(content=_SCORE_SYSTEM), HumanMessage(content=prompt)]
         )
         # 6000 tokens: reasoning models (R1/GLM/Kimi) burn budget on a <think>
